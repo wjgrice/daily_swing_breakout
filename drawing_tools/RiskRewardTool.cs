@@ -15,6 +15,7 @@ using NinjaTrader.NinjaScript.DrawingTools;
 using SharpDX;
 using SharpDX.Direct2D1;
 using SharpDX.DirectWrite;
+using System.Windows.Input;
 #endregion
 
 namespace NinjaTrader.NinjaScript.DrawingTools
@@ -49,8 +50,15 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         private SharpDX.Direct2D1.SolidColorBrush labelBrush;
         private SharpDX.Direct2D1.SolidColorBrush entryBrush;
         private SharpDX.Direct2D1.SolidColorBrush entryArmedBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnArmedBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnTextBrush;
         private TextFormat labelFormat;
         private TextFormat armedLabelFormat;
+        private TextFormat btnTextFormat;
+
+        // ARM button hit-test rect (screen coords, updated each render)
+        private RectangleF armButtonRect;
 
         [Display(Name = "Armed", GroupName = "RR Tool", Order = 1,
                  Description = "When checked, DSB strategy will trade this setup")]
@@ -141,8 +149,12 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             if (labelBrush != null)       { labelBrush.Dispose(); labelBrush = null; }
             if (entryBrush != null)       { entryBrush.Dispose(); entryBrush = null; }
             if (entryArmedBrush != null)  { entryArmedBrush.Dispose(); entryArmedBrush = null; }
+            if (btnBgBrush != null)       { btnBgBrush.Dispose(); btnBgBrush = null; }
+            if (btnArmedBgBrush != null)  { btnArmedBgBrush.Dispose(); btnArmedBgBrush = null; }
+            if (btnTextBrush != null)     { btnTextBrush.Dispose(); btnTextBrush = null; }
             if (labelFormat != null)      { labelFormat.Dispose(); labelFormat = null; }
             if (armedLabelFormat != null)  { armedLabelFormat.Dispose(); armedLabelFormat = null; }
+            if (btnTextFormat != null)    { btnTextFormat.Dispose(); btnTextFormat = null; }
         }
 
         public override void OnRenderTargetChanged()
@@ -164,6 +176,12 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                     new Color4(1f, 1f, 0f, 0.6f));
                 entryArmedBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
                     new Color4(1f, 1f, 0f, 1f));
+                btnBgBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
+                    new Color4(1f, 1f, 1f, 0.15f));
+                btnArmedBgBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
+                    new Color4(0f, 0.8f, 0f, 0.85f));
+                btnTextBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
+                    new Color4(1f, 1f, 1f, 0.95f));
 
                 var factory = NinjaTrader.Core.Globals.DirectWriteFactory;
                 labelFormat = new TextFormat(factory, "Arial",
@@ -174,6 +192,10 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                     SharpDX.DirectWrite.FontWeight.Bold,
                     SharpDX.DirectWrite.FontStyle.Normal,
                     SharpDX.DirectWrite.FontStretch.Normal, 12f);
+                btnTextFormat = new TextFormat(factory, "Arial",
+                    SharpDX.DirectWrite.FontWeight.Bold,
+                    SharpDX.DirectWrite.FontStyle.Normal,
+                    SharpDX.DirectWrite.FontStretch.Normal, 10f);
             }
         }
 
@@ -228,11 +250,37 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             DrawRRLabel(string.Format("SL  ({0:F2})  -1R", price0),
                 labelX, ySL - 8, labelBrush);
 
-            string entryLabel = Armed
-                ? string.Format("ARMED  Entry  ({0:F2})", price1)
-                : string.Format("Entry  ({0:F2})", price1);
-            var entryLabelFormat = Armed ? armedLabelFormat : labelFormat;
-            DrawRRLabel(entryLabel, labelX, yEntry - 8, activeEntryBrush, entryLabelFormat);
+            DrawRRLabel(string.Format("Entry  ({0:F2})", price1),
+                labelX, yEntry - 8, activeEntryBrush);
+
+            // ── ARM / ARMED button ─────────────────────────────────────
+            float btnX = labelX + 160;
+            float btnY = yEntry - 12;
+            float btnW = Armed ? 66 : 46;
+            float btnH = 20;
+            armButtonRect = new RectangleF(btnX, btnY, btnW, btnH);
+
+            var bgBrush  = Armed ? btnArmedBgBrush : btnBgBrush;
+            string btnText = Armed ? "ARMED" : "ARM";
+
+            var rounded = new RoundedRectangle
+            {
+                Rect    = armButtonRect,
+                RadiusX = 3,
+                RadiusY = 3
+            };
+            RenderTarget.FillRoundedRectangle(rounded, bgBrush);
+            RenderTarget.DrawRoundedRectangle(rounded, activeEntryBrush, 1f);
+
+            if (btnTextFormat != null)
+            {
+                var layout = new TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
+                    btnText, btnTextFormat, btnW, btnH);
+                layout.TextAlignment      = SharpDX.DirectWrite.TextAlignment.Center;
+                layout.ParagraphAlignment  = SharpDX.DirectWrite.ParagraphAlignment.Center;
+                RenderTarget.DrawTextLayout(new Vector2(btnX, btnY), layout, btnTextBrush);
+                layout.Dispose();
+            }
 
             // ── Position sizing from account ────────────────────────────
             string sizingLabel = "";
@@ -313,6 +361,37 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             layout.Dispose();
         }
 
+        #region ARM button click handling
+
+        public override void OnMouseDown(ChartControl chartControl, ChartPanel chartPanel,
+            ChartScale chartScale, ChartAnchor dataPoint)
+        {
+            if (armButtonRect.Width > 0)
+            {
+                System.Windows.Point clickPt = dataPoint.GetPoint(chartControl, chartPanel, chartScale);
+                if (armButtonRect.Contains((float)clickPt.X, (float)clickPt.Y))
+                {
+                    Armed = !Armed;
+                    chartControl.InvalidateVisual();
+                    return;
+                }
+            }
+
+            base.OnMouseDown(chartControl, chartPanel, chartScale, dataPoint);
+        }
+
+        public override Cursor GetCursor(ChartControl chartControl, ChartPanel chartPanel,
+            ChartScale chartScale, System.Windows.Point point)
+        {
+            if (armButtonRect.Width > 0
+                && armButtonRect.Contains((float)point.X, (float)point.Y))
+                return Cursors.Hand;
+
+            return base.GetCursor(chartControl, chartPanel, chartScale, point);
+        }
+
+        #endregion
+
         #region Public helpers (called by DSB strategy)
 
         public double GetSLPrice()
@@ -370,24 +449,8 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
         #endregion
 
-        #region Static Draw (for programmatic placement by strategy)
-
-        /// <summary>
-        /// Programmatically place an RR Tool on the chart (v2: called by DSB strategy).
-        /// Uses DrawToToggleObject — the standard pattern for custom DrawingTools
-        /// compiled into NinjaTrader.Custom.dll.
-        /// </summary>
-        public static RiskRewardTool DrawRRTool(NinjaScriptBase owner, string tag,
-            int startBarsAgo, double slPrice, int endBarsAgo, double entryPrice,
-            bool armed)
-        {
-            var tool = DrawingTool.DrawToToggleObject<RiskRewardTool>(owner, tag,
-                false, startBarsAgo, slPrice, endBarsAgo, entryPrice);
-            if (tool != null)
-                tool.Armed = armed;
-            return tool;
-        }
-
-        #endregion
+        // Static DrawRRTool() for programmatic placement deferred to v2.
+        // DrawToToggleObject<T> is not public API — will need an alternative
+        // approach (e.g., strategy creates via DrawObjects.Add or chart API).
     }
 }
