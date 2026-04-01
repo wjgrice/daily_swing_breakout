@@ -372,7 +372,12 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
         #region Static Draw (for programmatic placement by strategy)
 
-        public static RiskRewardTool Draw(NinjaScriptBase owner, string tag,
+        /// <summary>
+        /// Programmatically place an RR Tool on the chart (v2: called by DSB strategy).
+        /// Uses DrawToToggleObject — the standard pattern for custom DrawingTools
+        /// compiled into NinjaTrader.Custom.dll.
+        /// </summary>
+        public static RiskRewardTool DrawRRTool(NinjaScriptBase owner, string tag,
             int startBarsAgo, double slPrice, int endBarsAgo, double entryPrice,
             bool armed)
         {

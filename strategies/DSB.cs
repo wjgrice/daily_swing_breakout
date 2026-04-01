@@ -162,7 +162,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             RiskRewardTool found = null;
 
-            foreach (var drawObj in DrawObjects)
+            foreach (var drawObj in DrawObjects.ToList())
             {
                 var rr = drawObj as RiskRewardTool;
                 if (rr == null || !rr.Armed) continue;
@@ -274,19 +274,25 @@ namespace NinjaTrader.NinjaScript.Strategies
             // ── Entry fill ──────────────────────────────────────────────
             if (entryOrder != null && execution.Order == entryOrder)
             {
-                sumFilled += execution.Quantity;
-
-                if (entryOrder.OrderState == OrderState.Filled
-                    && sumFilled == entryOrder.Filled)
+                if (execution.Order.OrderState == OrderState.Filled
+                    || execution.Order.OrderState == OrderState.PartFilled
+                    || (execution.Order.OrderState == OrderState.Cancelled && execution.Order.Filled > 0))
                 {
-                    lockedContracts = entryOrder.Filled;
-                    entryOrder = null;
-                    sumFilled  = 0;
+                    sumFilled += execution.Quantity;
 
-                    SubmitBracketOrders();
-                    state = TradeState.InPosition;
-                    Print(string.Format("DSB: Entry filled. {0} contracts at {1:F2}. Bracket placed.",
-                        lockedContracts, price));
+                    // Only submit bracket once fully filled (or cancelled with partial)
+                    if (execution.Order.OrderState != OrderState.PartFilled
+                        && sumFilled == execution.Order.Filled)
+                    {
+                        lockedContracts = execution.Order.Filled;
+                        entryOrder = null;
+                        sumFilled  = 0;
+
+                        SubmitBracketOrders();
+                        state = TradeState.InPosition;
+                        Print(string.Format("DSB: Entry filled. {0} contracts at {1:F2}. Bracket placed.",
+                            lockedContracts, price));
+                    }
                 }
                 return;
             }
@@ -328,6 +334,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             double averageFillPrice, OrderState orderState, DateTime time,
             ErrorCode error, string comment)
         {
+            // Track order references by signal name (more reliable than return value)
+            if (order.Name == "DSB_Entry")
+                entryOrder = order;
+            else if (order.Name == "DSB_SL")
+                stopOrder = order;
+            else if (order.Name.StartsWith("DSB_TP"))
+            {
+                if (!tpOrders.Contains(order))
+                    tpOrders.Add(order);
+            }
+
+            // Handle entry cancellation/rejection
             if (order == entryOrder && (orderState == OrderState.Cancelled
                                      || orderState == OrderState.Rejected))
             {
@@ -352,7 +370,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             int[] splits = ComputeSplits();
 
             OrderAction tpAction = lockedIsLong ? OrderAction.Sell : OrderAction.BuyToCover;
-            int tpLevel = 1;
 
             for (int i = 0; i < splits.Length; i++)
             {
@@ -465,9 +482,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private int GetTPFilledQty()
         {
-            int filled = 0;
-            // We remove filled TPs from the list, so we need to track cumulatively
-            // Use: total contracts - remaining TP order quantities
             int remainingTPQty = 0;
             foreach (var tp in tpOrders)
                 if (tp != null) remainingTPQty += tp.Quantity;
