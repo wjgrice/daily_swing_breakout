@@ -92,8 +92,9 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         [Browsable(false)]
         public double CurrentSLPrice { get; set; }
 
+        // Bitmask: bit N set = level N filled (e.g., 0b1010 = 1:2 and 1:4 filled)
         [Browsable(false)]
-        public int FilledTPCount { get; set; }
+        public int FilledTPLevels { get; set; }
 
         [Browsable(false)]
         public double RealizedPnL { get; set; }
@@ -158,7 +159,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 RiskOpacity  = 15;
                 RewardOpacity = 10;
                 AccountName  = "Sim101";
-                RiskPercent  = 1.0;
+                RiskPercent  = 4.0;
 
                 PriceLevels.Clear();
 
@@ -360,7 +361,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                     lineBrush, 0.5f);
 
                 // Label with filled indicator
-                bool filled = r <= FilledTPCount;
+                bool filled = (FilledTPLevels & (1 << r)) != 0;
                 string lvlLabel = filled
                     ? string.Format("1:{0}  ({1:F2})  +{0}R  FILLED", r, targetPrice)
                     : string.Format("1:{0}  ({1:F2})  +{0}R", r, targetPrice);
@@ -504,7 +505,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                             break; // no-op while in position
                         case RRTradeState.Closed:
                             TradeState = RRTradeState.Unarmed; // reset
-                            FilledTPCount  = 0;
+                            FilledTPLevels  = 0;
                             ActiveContracts = 0;
                             RealizedPnL    = 0;
                             CurrentSLPrice = 0;

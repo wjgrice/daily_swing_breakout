@@ -17,4 +17,9 @@ cp "$REPO_ROOT/drawing_tools/"*.cs "$NT_CUSTOM/DrawingTools/" && \
 cp "$REPO_ROOT/strategies/"*.cs "$NT_CUSTOM/Strategies/" && \
     echo "  Strategies:   $(ls "$REPO_ROOT/strategies/"*.cs | xargs -n1 basename | tr '\n' ' ')"
 
+if ls "$REPO_ROOT/indicators/"*.cs 1>/dev/null 2>&1; then
+    cp "$REPO_ROOT/indicators/"*.cs "$NT_CUSTOM/Indicators/" && \
+        echo "  Indicators:   $(ls "$REPO_ROOT/indicators/"*.cs | xargs -n1 basename | tr '\n' ' ')"
+fi
+
 echo "Done. Open NinjaTrader and compile (F5 in NinjaScript Editor)."
