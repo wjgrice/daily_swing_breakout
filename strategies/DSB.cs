@@ -125,11 +125,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             highestPassedLevel = 0;
             LockLevels(rrTool, contracts);
 
-            Print(string.Format("DSB: {0} {1} | {2} cts @ {3:F2} | SL {4:F2} | Risk ${5:N0} ({6:F1}%)",
+            double totalRisk = rrTool.GetRisk() * pointValue * lockedContracts;
+            Print(string.Format("DSB: {0} {1} | {2} cts @ {3:F2} | SL {4:F2} | Risk ${5:N0}",
                 lockedIsLong ? "LONG" : "SHORT", Instrument.FullName,
-                lockedContracts, lockedEntryPrice, lockedSLPrice,
-                rrTool.GetRisk() * pointValue * lockedContracts,
-                equity > 0 ? (rrTool.GetRisk() * pointValue * lockedContracts / equity * 100.0) : 0));
+                lockedContracts, lockedEntryPrice, lockedSLPrice, totalRisk));
 
             SubmitEntry();
 

@@ -24,9 +24,13 @@ namespace NinjaTrader.NinjaScript.Indicators
         private int lastSwingHighBar;
         private int lastSwingLowBar;
 
-        // Store recent major swings for external access
+        // Alternation: +1 = last was high, -1 = last was low, 0 = none
+        private int lastSwingType;
+
+        // Store recent major swings (alternating) for external access
         private List<SwingPoint> majorSwingHighs;
         private List<SwingPoint> majorSwingLows;
+        private List<SwingPoint> majorSwings; // interleaved, alternating
 
         public struct SwingPoint
         {
@@ -123,8 +127,10 @@ namespace NinjaTrader.NinjaScript.Indicators
 
                 lastSwingHighBar = -1;
                 lastSwingLowBar  = -1;
+                lastSwingType    = 0;
                 majorSwingHighs  = new List<SwingPoint>();
                 majorSwingLows   = new List<SwingPoint>();
+                majorSwings      = new List<SwingPoint>();
             }
         }
 
@@ -145,25 +151,52 @@ namespace NinjaTrader.NinjaScript.Indicators
                 double shPrice = High[shBar];
                 int absBar     = CurrentBar - shBar;
 
-                // Find the nearest swing low to measure size
                 double nearestLow = FindNearestSwingLow(shBar);
                 double swingSize  = nearestLow > 0 ? Math.Abs(shPrice - nearestLow) : double.MaxValue;
 
                 if (swingSize >= minSize)
                 {
+                    if (lastSwingType == 1)
+                    {
+                        // Consecutive high — replace if this one is higher
+                        if (majorSwingHighs.Count > 0 && shPrice > majorSwingHighs[majorSwingHighs.Count - 1].Price)
+                        {
+                            // Remove old marker
+                            var old = majorSwingHighs[majorSwingHighs.Count - 1];
+                            RemoveDrawObject("SH_" + old.BarIndex);
+                            majorSwingHighs[majorSwingHighs.Count - 1] = new SwingPoint(shPrice, absBar);
+                            majorSwings[majorSwings.Count - 1] = new SwingPoint(shPrice, absBar);
+                        }
+                        else
+                        {
+                            // New high is lower — skip it
+                            lastSwingHighBar = absBar;
+                            goto CheckSwingLow;
+                        }
+                    }
+                    else
+                    {
+                        // Alternating — normal add
+                        majorSwingHighs.Add(new SwingPoint(shPrice, absBar));
+                        majorSwings.Add(new SwingPoint(shPrice, absBar));
+
+                        if (majorSwingHighs.Count > MaxSwingsTracked)
+                            majorSwingHighs.RemoveAt(0);
+                        if (majorSwings.Count > MaxSwingsTracked * 2)
+                            majorSwings.RemoveAt(0);
+                    }
+
                     lastSwingHighBar = absBar;
-                    majorSwingHighs.Add(new SwingPoint(shPrice, absBar));
+                    lastSwingType    = 1;
 
-                    if (majorSwingHighs.Count > MaxSwingsTracked)
-                        majorSwingHighs.RemoveAt(0);
-
-                    // Draw marker
-                    Draw.TriangleDown(this,
+                    NinjaTrader.NinjaScript.DrawingTools.Draw.TriangleDown(this,
                         "SH_" + absBar, false, shBar,
                         shPrice + MarkerOffset * TickSize,
                         SwingHighColor);
                 }
             }
+
+            CheckSwingLow:
 
             // Check for new swing low (confirmed SwingStrength bars ago)
             int slBar = swing.SwingLowBar(0, 1, SwingStrength + 1);
@@ -172,20 +205,42 @@ namespace NinjaTrader.NinjaScript.Indicators
                 double slPrice = Low[slBar];
                 int absBar     = CurrentBar - slBar;
 
-                // Find the nearest swing high to measure size
                 double nearestHigh = FindNearestSwingHigh(slBar);
                 double swingSize   = nearestHigh > 0 ? Math.Abs(nearestHigh - slPrice) : double.MaxValue;
 
                 if (swingSize >= minSize)
                 {
+                    if (lastSwingType == -1)
+                    {
+                        // Consecutive low — replace if this one is lower
+                        if (majorSwingLows.Count > 0 && slPrice < majorSwingLows[majorSwingLows.Count - 1].Price)
+                        {
+                            var old = majorSwingLows[majorSwingLows.Count - 1];
+                            RemoveDrawObject("SL_" + old.BarIndex);
+                            majorSwingLows[majorSwingLows.Count - 1] = new SwingPoint(slPrice, absBar);
+                            majorSwings[majorSwings.Count - 1] = new SwingPoint(slPrice, absBar);
+                        }
+                        else
+                        {
+                            lastSwingLowBar = absBar;
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        majorSwingLows.Add(new SwingPoint(slPrice, absBar));
+                        majorSwings.Add(new SwingPoint(slPrice, absBar));
+
+                        if (majorSwingLows.Count > MaxSwingsTracked)
+                            majorSwingLows.RemoveAt(0);
+                        if (majorSwings.Count > MaxSwingsTracked * 2)
+                            majorSwings.RemoveAt(0);
+                    }
+
                     lastSwingLowBar = absBar;
-                    majorSwingLows.Add(new SwingPoint(slPrice, absBar));
+                    lastSwingType   = -1;
 
-                    if (majorSwingLows.Count > MaxSwingsTracked)
-                        majorSwingLows.RemoveAt(0);
-
-                    // Draw marker
-                    Draw.TriangleUp(this,
+                    NinjaTrader.NinjaScript.DrawingTools.Draw.TriangleUp(this,
                         "SL_" + absBar, false, slBar,
                         slPrice - MarkerOffset * TickSize,
                         SwingLowColor);
