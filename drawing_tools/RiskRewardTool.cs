@@ -20,6 +20,16 @@ using System.Windows.Input;
 
 namespace NinjaTrader.NinjaScript.DrawingTools
 {
+    public enum RRTradeState
+    {
+        Unarmed,
+        Preview,
+        Confirmed,
+        Pending,
+        Live,
+        Closed
+    }
+
     public class AccountNameConverter : TypeConverter
     {
         public override bool GetStandardValuesSupported(ITypeDescriptorContext context) { return true; }
@@ -49,20 +59,47 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         private SharpDX.Direct2D1.SolidColorBrush rewardFillBrush;
         private SharpDX.Direct2D1.SolidColorBrush labelBrush;
         private SharpDX.Direct2D1.SolidColorBrush entryBrush;
-        private SharpDX.Direct2D1.SolidColorBrush entryArmedBrush;
-        private SharpDX.Direct2D1.SolidColorBrush btnBgBrush;
-        private SharpDX.Direct2D1.SolidColorBrush btnArmedBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush entryActiveBrush;
+        private SharpDX.Direct2D1.SolidColorBrush trailSLBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnUnarmedBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnConfirmBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnPendingBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnLiveBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnClosedBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnProfitBgBrush;
+        private SharpDX.Direct2D1.SolidColorBrush btnLossBgBrush;
         private SharpDX.Direct2D1.SolidColorBrush btnTextBrush;
+        private SharpDX.Direct2D1.SolidColorBrush dimBrush;
+        private SharpDX.Direct2D1.SolidColorBrush filledCheckBrush;
         private TextFormat labelFormat;
-        private TextFormat armedLabelFormat;
+        private TextFormat boldFormat;
         private TextFormat btnTextFormat;
+        private TextFormat infoFormat;
 
         // ARM button hit-test rect (screen coords, updated each render)
         private RectangleF armButtonRect;
 
-        [Display(Name = "Armed", GroupName = "RR Tool", Order = 1,
-                 Description = "When checked, DSB strategy will trade this setup")]
-        public bool Armed { get; set; }
+        #region Properties
+
+        [Display(Name = "Trade State", GroupName = "RR Tool", Order = 1)]
+        public RRTradeState TradeState { get; set; }
+
+        // Backward compat — DSB scans for Armed == true (Confirmed state)
+        [Browsable(false)]
+        public bool Armed { get { return TradeState == RRTradeState.Confirmed; } }
+
+        // Status properties written by DSB strategy
+        [Browsable(false)]
+        public double CurrentSLPrice { get; set; }
+
+        [Browsable(false)]
+        public int FilledTPCount { get; set; }
+
+        [Browsable(false)]
+        public double RealizedPnL { get; set; }
+
+        [Browsable(false)]
+        public int ActiveContracts { get; set; }
 
         [Display(Name = "Risk Color", GroupName = "RR Tool", Order = 10)]
         [XmlIgnore]
@@ -104,6 +141,8 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         [Range(0.1, 10.0)]
         public double RiskPercent { get; set; }
 
+        #endregion
+
         protected override void OnStateChange()
         {
             base.OnStateChange();
@@ -113,7 +152,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 Name         = "RR Tool";
                 Description  = "Risk:Reward tool — anchor 1 = Stop Loss, anchor 2 = Entry, extensions show R:R levels";
 
-                Armed        = false;
+                TradeState   = RRTradeState.Unarmed;
                 RiskColor    = System.Windows.Media.Brushes.IndianRed;
                 RewardColor  = System.Windows.Media.Brushes.MediumSeaGreen;
                 RiskOpacity  = 15;
@@ -142,19 +181,27 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             }
         }
 
+        #region DX resource management
+
         private void DisposeDX()
         {
-            if (riskFillBrush != null)    { riskFillBrush.Dispose(); riskFillBrush = null; }
-            if (rewardFillBrush != null)  { rewardFillBrush.Dispose(); rewardFillBrush = null; }
-            if (labelBrush != null)       { labelBrush.Dispose(); labelBrush = null; }
-            if (entryBrush != null)       { entryBrush.Dispose(); entryBrush = null; }
-            if (entryArmedBrush != null)  { entryArmedBrush.Dispose(); entryArmedBrush = null; }
-            if (btnBgBrush != null)       { btnBgBrush.Dispose(); btnBgBrush = null; }
-            if (btnArmedBgBrush != null)  { btnArmedBgBrush.Dispose(); btnArmedBgBrush = null; }
-            if (btnTextBrush != null)     { btnTextBrush.Dispose(); btnTextBrush = null; }
-            if (labelFormat != null)      { labelFormat.Dispose(); labelFormat = null; }
-            if (armedLabelFormat != null)  { armedLabelFormat.Dispose(); armedLabelFormat = null; }
-            if (btnTextFormat != null)    { btnTextFormat.Dispose(); btnTextFormat = null; }
+            var brushes = new IDisposable[] {
+                riskFillBrush, rewardFillBrush, labelBrush, entryBrush, entryActiveBrush,
+                trailSLBrush, btnUnarmedBgBrush, btnConfirmBgBrush, btnPendingBgBrush,
+                btnLiveBgBrush, btnClosedBgBrush, btnProfitBgBrush, btnLossBgBrush,
+                btnTextBrush, dimBrush, filledCheckBrush,
+                labelFormat, boldFormat, btnTextFormat, infoFormat
+            };
+            foreach (var b in brushes)
+                if (b != null) b.Dispose();
+
+            riskFillBrush = null; rewardFillBrush = null; labelBrush = null;
+            entryBrush = null; entryActiveBrush = null; trailSLBrush = null;
+            btnUnarmedBgBrush = null; btnConfirmBgBrush = null; btnPendingBgBrush = null;
+            btnLiveBgBrush = null; btnClosedBgBrush = null; btnProfitBgBrush = null;
+            btnLossBgBrush = null; btnTextBrush = null; dimBrush = null;
+            filledCheckBrush = null;
+            labelFormat = null; boldFormat = null; btnTextFormat = null; infoFormat = null;
         }
 
         public override void OnRenderTargetChanged()
@@ -166,38 +213,47 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 var rc = ((System.Windows.Media.SolidColorBrush)RiskColor).Color;
                 var gc = ((System.Windows.Media.SolidColorBrush)RewardColor).Color;
 
-                riskFillBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
-                    new Color4(rc.R / 255f, rc.G / 255f, rc.B / 255f, RiskOpacity / 100f));
-                rewardFillBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
-                    new Color4(gc.R / 255f, gc.G / 255f, gc.B / 255f, RewardOpacity / 100f));
-                labelBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
-                    new Color4(1f, 1f, 1f, 0.85f));
-                entryBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
-                    new Color4(1f, 1f, 0f, 0.6f));
-                entryArmedBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
-                    new Color4(1f, 1f, 0f, 1f));
-                btnBgBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
-                    new Color4(1f, 1f, 1f, 0.15f));
-                btnArmedBgBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
-                    new Color4(0f, 0.8f, 0f, 0.85f));
-                btnTextBrush = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget,
-                    new Color4(1f, 1f, 1f, 0.95f));
+                riskFillBrush     = MakeBrush(rc.R / 255f, rc.G / 255f, rc.B / 255f, RiskOpacity / 100f);
+                rewardFillBrush   = MakeBrush(gc.R / 255f, gc.G / 255f, gc.B / 255f, RewardOpacity / 100f);
+                labelBrush        = MakeBrush(1f, 1f, 1f, 0.85f);
+                entryBrush        = MakeBrush(1f, 1f, 0f, 0.6f);
+                entryActiveBrush  = MakeBrush(1f, 1f, 0f, 1f);
+                trailSLBrush      = MakeBrush(0f, 0.8f, 1f, 0.9f);     // cyan
+                btnUnarmedBgBrush = MakeBrush(1f, 1f, 1f, 0.15f);
+                btnConfirmBgBrush = MakeBrush(1f, 1f, 0f, 0.3f);       // yellow tint
+                btnPendingBgBrush = MakeBrush(0.2f, 0.5f, 1f, 0.85f);  // blue
+                btnLiveBgBrush    = MakeBrush(0f, 0.8f, 0f, 0.85f);    // green
+                btnClosedBgBrush  = MakeBrush(0.4f, 0.4f, 0.4f, 0.6f); // gray
+                btnProfitBgBrush  = MakeBrush(0f, 0.7f, 0f, 0.85f);    // green
+                btnLossBgBrush    = MakeBrush(0.8f, 0.15f, 0.15f, 0.85f); // red
+                btnTextBrush      = MakeBrush(1f, 1f, 1f, 0.95f);
+                dimBrush          = MakeBrush(1f, 1f, 1f, 0.3f);
+                filledCheckBrush  = MakeBrush(0f, 1f, 0f, 0.9f);
 
                 var factory = NinjaTrader.Core.Globals.DirectWriteFactory;
-                labelFormat = new TextFormat(factory, "Arial",
-                    SharpDX.DirectWrite.FontWeight.Normal,
-                    SharpDX.DirectWrite.FontStyle.Normal,
-                    SharpDX.DirectWrite.FontStretch.Normal, 11f);
-                armedLabelFormat = new TextFormat(factory, "Arial",
-                    SharpDX.DirectWrite.FontWeight.Bold,
-                    SharpDX.DirectWrite.FontStyle.Normal,
-                    SharpDX.DirectWrite.FontStretch.Normal, 12f);
-                btnTextFormat = new TextFormat(factory, "Arial",
-                    SharpDX.DirectWrite.FontWeight.Bold,
-                    SharpDX.DirectWrite.FontStyle.Normal,
-                    SharpDX.DirectWrite.FontStretch.Normal, 10f);
+                labelFormat   = MakeTextFormat(factory, SharpDX.DirectWrite.FontWeight.Normal, 11f);
+                boldFormat    = MakeTextFormat(factory, SharpDX.DirectWrite.FontWeight.Bold, 12f);
+                btnTextFormat = MakeTextFormat(factory, SharpDX.DirectWrite.FontWeight.Bold, 10f);
+                infoFormat    = MakeTextFormat(factory, SharpDX.DirectWrite.FontWeight.Normal, 10f);
             }
         }
+
+        private SharpDX.Direct2D1.SolidColorBrush MakeBrush(float r, float g, float b, float a)
+        {
+            return new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new Color4(r, g, b, a));
+        }
+
+        private TextFormat MakeTextFormat(SharpDX.DirectWrite.Factory factory,
+            SharpDX.DirectWrite.FontWeight weight, float size)
+        {
+            return new TextFormat(factory, "Arial", weight,
+                SharpDX.DirectWrite.FontStyle.Normal,
+                SharpDX.DirectWrite.FontStretch.Normal, size);
+        }
+
+        #endregion
+
+        #region Rendering
 
         public override void OnRender(ChartControl chartControl, ChartScale chartScale)
         {
@@ -216,6 +272,8 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             if (riskFillBrush == null) return;
 
             double direction = price1 - price0;
+            bool isActive = TradeState != RRTradeState.Unarmed;
+            bool isClosed = TradeState == RRTradeState.Closed;
 
             float x1 = (float)anchorList[0].GetPoint(chartControl, ChartPanel, chartScale).X;
             float x2 = (float)anchorList[1].GetPoint(chartControl, ChartPanel, chartScale).X;
@@ -225,64 +283,146 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
             float ySL    = chartScale.GetYByValue(price0);
             float yEntry = chartScale.GetYByValue(price1);
+            float labelX = xRight + 8;
 
             // ── Shade risk zone (SL → Entry) ────────────────────────────
             float top    = Math.Min(ySL, yEntry);
             float bottom = Math.Max(ySL, yEntry);
             RenderTarget.FillRectangle(
                 new RectangleF(xLeft, top, xRight - xLeft, bottom - top),
-                riskFillBrush);
+                isClosed ? dimBrush : riskFillBrush);
 
-            // ── Draw SL and Entry lines ──────────────────────────────────
-            var activeEntryBrush = Armed ? entryArmedBrush : entryBrush;
-            float entryLineWidth = Armed ? 3f : 2f;
+            // ── SL and Entry lines ──────────────────────────────────────
+            var activeEntryBrush = isActive ? entryActiveBrush : entryBrush;
+            float entryLineWidth = isActive ? 3f : 2f;
 
             RenderTarget.DrawLine(
                 new Vector2(xLeft, ySL), new Vector2(xRight, ySL),
-                riskFillBrush, 2f);
+                isClosed ? dimBrush : riskFillBrush, 2f);
             RenderTarget.DrawLine(
                 new Vector2(xLeft, yEntry), new Vector2(xRight, yEntry),
-                activeEntryBrush, entryLineWidth);
+                isClosed ? dimBrush : activeEntryBrush, entryLineWidth);
 
-            // ── Custom labels ───────────────────────────────────────────
-            float labelX = xRight + 8;
+            // ── Labels ──────────────────────────────────────────────────
+            var slLabelBrush   = isClosed ? dimBrush : labelBrush;
+            var entryLabelBrush = isClosed ? dimBrush : activeEntryBrush;
 
             DrawRRLabel(string.Format("SL  ({0:F2})  -1R", price0),
-                labelX, ySL - 8, labelBrush);
-
+                labelX, ySL - 8, slLabelBrush);
             DrawRRLabel(string.Format("Entry  ({0:F2})", price1),
-                labelX, yEntry - 8, activeEntryBrush);
+                labelX, yEntry - 8, entryLabelBrush);
 
-            // ── ARM / ARMED button ─────────────────────────────────────
+            // ── Trailing SL line (Live state) ───────────────────────────
+            if (TradeState == RRTradeState.Live && CurrentSLPrice > 0)
+            {
+                float yTrailSL = chartScale.GetYByValue(CurrentSLPrice);
+                RenderTarget.DrawLine(
+                    new Vector2(xLeft, yTrailSL), new Vector2(xRight, yTrailSL),
+                    trailSLBrush, 2f);
+                DrawRRLabel(string.Format("SL  ({0:F2})", CurrentSLPrice),
+                    labelX, yTrailSL - 8, trailSLBrush);
+            }
+
+            // ── Button ──────────────────────────────────────────────────
+            RenderButton(labelX, yEntry);
+
+            // ── Preview info line ───────────────────────────────────────
+            if (TradeState == RRTradeState.Preview || TradeState == RRTradeState.Confirmed)
+            {
+                int cts = GetContracts();
+                string info = string.Format("{0} contracts  |  Levels 1R-6R", cts);
+                float infoY = yEntry + (direction > 0 ? -24 : 12);
+                DrawRRLabel(info, labelX, infoY, entryActiveBrush, infoFormat);
+            }
+
+            // ── Position sizing (Unarmed/Preview only) ──────────────────
+            if (TradeState == RRTradeState.Unarmed || TradeState == RRTradeState.Preview)
+                RenderSizingLabel(risk, labelX, ySL, yEntry, activeEntryBrush);
+
+            // ── R:R level zones + labels ────────────────────────────────
+            float yPrev = yEntry;
+            for (int r = 1; r <= 6; r++)
+            {
+                double targetPrice = price1 + direction * r;
+                float yTarget = chartScale.GetYByValue(targetPrice);
+
+                float sTop = Math.Min(yPrev, yTarget);
+                float sBot = Math.Max(yPrev, yTarget);
+
+                var zoneBrush = isClosed ? dimBrush : rewardFillBrush;
+                RenderTarget.FillRectangle(
+                    new RectangleF(xLeft, sTop, xRight - xLeft, sBot - sTop),
+                    zoneBrush);
+
+                var lineBrush = isClosed ? dimBrush : labelBrush;
+                RenderTarget.DrawLine(
+                    new Vector2(xLeft, yTarget), new Vector2(xRight, yTarget),
+                    lineBrush, 0.5f);
+
+                // Label with filled indicator
+                bool filled = r <= FilledTPCount;
+                string lvlLabel = filled
+                    ? string.Format("1:{0}  ({1:F2})  +{0}R  FILLED", r, targetPrice)
+                    : string.Format("1:{0}  ({1:F2})  +{0}R", r, targetPrice);
+
+                var lvlBrush = filled ? filledCheckBrush : (isClosed ? dimBrush : labelBrush);
+                DrawRRLabel(lvlLabel, labelX, yTarget - 8, lvlBrush);
+
+                yPrev = yTarget;
+            }
+        }
+
+        private void RenderButton(float labelX, float yEntry)
+        {
+            string btnText;
+            SharpDX.Direct2D1.SolidColorBrush bgBrush;
+            SharpDX.Direct2D1.SolidColorBrush borderBrush;
+            float btnW;
+
+            switch (TradeState)
+            {
+                case RRTradeState.Unarmed:
+                    btnText = "ARM";    bgBrush = btnUnarmedBgBrush; borderBrush = entryBrush; btnW = 46; break;
+                case RRTradeState.Preview:
+                    btnText = "CONFIRM"; bgBrush = btnConfirmBgBrush; borderBrush = entryActiveBrush; btnW = 76; break;
+                case RRTradeState.Confirmed:
+                    btnText = "WAITING"; bgBrush = btnConfirmBgBrush; borderBrush = entryActiveBrush; btnW = 72; break;
+                case RRTradeState.Pending:
+                    btnText = "PENDING"; bgBrush = btnPendingBgBrush; borderBrush = btnPendingBgBrush; btnW = 76; break;
+                case RRTradeState.Live:
+                    btnText = string.Format("LIVE ({0})", ActiveContracts);
+                    bgBrush = btnLiveBgBrush; borderBrush = btnLiveBgBrush; btnW = 80; break;
+                case RRTradeState.Closed:
+                    btnText = string.Format("{0}{1:F0}", RealizedPnL >= 0 ? "+$" : "-$", Math.Abs(RealizedPnL));
+                    bgBrush = RealizedPnL >= 0 ? btnProfitBgBrush : btnLossBgBrush;
+                    borderBrush = bgBrush; btnW = 80; break;
+                default:
+                    btnText = "ARM";    bgBrush = btnUnarmedBgBrush; borderBrush = entryBrush; btnW = 46; break;
+            }
+
             float btnX = labelX + 160;
             float btnY = yEntry - 12;
-            float btnW = Armed ? 66 : 46;
             float btnH = 20;
             armButtonRect = new RectangleF(btnX, btnY, btnW, btnH);
 
-            var bgBrush  = Armed ? btnArmedBgBrush : btnBgBrush;
-            string btnText = Armed ? "ARMED" : "ARM";
-
-            var rounded = new RoundedRectangle
-            {
-                Rect    = armButtonRect,
-                RadiusX = 3,
-                RadiusY = 3
-            };
+            var rounded = new RoundedRectangle { Rect = armButtonRect, RadiusX = 3, RadiusY = 3 };
             RenderTarget.FillRoundedRectangle(rounded, bgBrush);
-            RenderTarget.DrawRoundedRectangle(rounded, activeEntryBrush, 1f);
+            RenderTarget.DrawRoundedRectangle(rounded, borderBrush, 1f);
 
             if (btnTextFormat != null)
             {
                 var layout = new TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
                     btnText, btnTextFormat, btnW, btnH);
-                layout.TextAlignment      = SharpDX.DirectWrite.TextAlignment.Center;
-                layout.ParagraphAlignment  = SharpDX.DirectWrite.ParagraphAlignment.Center;
+                layout.TextAlignment     = SharpDX.DirectWrite.TextAlignment.Center;
+                layout.ParagraphAlignment = SharpDX.DirectWrite.ParagraphAlignment.Center;
                 RenderTarget.DrawTextLayout(new Vector2(btnX, btnY), layout, btnTextBrush);
                 layout.Dispose();
             }
+        }
 
-            // ── Position sizing from account ────────────────────────────
+        private void RenderSizingLabel(double risk, float labelX, float ySL, float yEntry,
+            SharpDX.Direct2D1.Brush brush)
+        {
             string sizingLabel = "";
             try
             {
@@ -311,9 +451,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                                     riskPerContract, riskAmount, RiskPercent);
                         }
                         else
-                        {
                             sizingLabel = string.Format("Account '{0}' not found", AccountName);
-                        }
                     }
                 }
             }
@@ -323,30 +461,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             {
                 bool slIsBelow = ySL > yEntry;
                 float sizingY = slIsBelow ? ySL + 4 : ySL - 20;
-                DrawRRLabel(sizingLabel, labelX, sizingY, activeEntryBrush);
-            }
-
-            // ── Shade each R:R level + labels ───────────────────────────
-            float yPrev = yEntry;
-            for (int r = 1; r <= 6; r++)
-            {
-                double targetPrice = price1 + direction * r;
-                float yTarget = chartScale.GetYByValue(targetPrice);
-
-                float sTop = Math.Min(yPrev, yTarget);
-                float sBot = Math.Max(yPrev, yTarget);
-                RenderTarget.FillRectangle(
-                    new RectangleF(xLeft, sTop, xRight - xLeft, sBot - sTop),
-                    rewardFillBrush);
-
-                RenderTarget.DrawLine(
-                    new Vector2(xLeft, yTarget), new Vector2(xRight, yTarget),
-                    labelBrush, 0.5f);
-
-                DrawRRLabel(string.Format("1:{0}  ({1:F2})  +{0}R", r, targetPrice),
-                    labelX, yTarget - 8, labelBrush);
-
-                yPrev = yTarget;
+                DrawRRLabel(sizingLabel, labelX, sizingY, brush);
             }
         }
 
@@ -356,12 +471,14 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             var fmt = format ?? labelFormat;
             if (fmt == null || RenderTarget == null) return;
             var layout = new TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
-                text, fmt, 350, 18);
+                text, fmt, 400, 18);
             RenderTarget.DrawTextLayout(new Vector2(x, y), layout, brush);
             layout.Dispose();
         }
 
-        #region ARM button click handling
+        #endregion
+
+        #region Mouse interaction
 
         public override void OnMouseDown(ChartControl chartControl, ChartPanel chartPanel,
             ChartScale chartScale, ChartAnchor dataPoint)
@@ -371,7 +488,28 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 System.Windows.Point clickPt = dataPoint.GetPoint(chartControl, chartPanel, chartScale);
                 if (armButtonRect.Contains((float)clickPt.X, (float)clickPt.Y))
                 {
-                    Armed = !Armed;
+                    switch (TradeState)
+                    {
+                        case RRTradeState.Unarmed:
+                            TradeState = RRTradeState.Preview;
+                            break;
+                        case RRTradeState.Preview:
+                            TradeState = RRTradeState.Confirmed;
+                            break;
+                        case RRTradeState.Confirmed:
+                        case RRTradeState.Pending:
+                            TradeState = RRTradeState.Unarmed; // cancel
+                            break;
+                        case RRTradeState.Live:
+                            break; // no-op while in position
+                        case RRTradeState.Closed:
+                            TradeState = RRTradeState.Unarmed; // reset
+                            FilledTPCount  = 0;
+                            ActiveContracts = 0;
+                            RealizedPnL    = 0;
+                            CurrentSLPrice = 0;
+                            break;
+                    }
                     chartControl.InvalidateVisual();
                     return;
                 }
@@ -384,7 +522,8 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             ChartScale chartScale, System.Windows.Point point)
         {
             if (armButtonRect.Width > 0
-                && armButtonRect.Contains((float)point.X, (float)point.Y))
+                && armButtonRect.Contains((float)point.X, (float)point.Y)
+                && TradeState != RRTradeState.Live)
                 return Cursors.Hand;
 
             return base.GetCursor(chartControl, chartPanel, chartScale, point);
@@ -448,9 +587,5 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         }
 
         #endregion
-
-        // Static DrawRRTool() for programmatic placement deferred to v2.
-        // DrawToToggleObject<T> is not public API — will need an alternative
-        // approach (e.g., strategy creates via DrawObjects.Add or chart API).
     }
 }

@@ -42,14 +42,17 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool                lockedIsLong;
         private double[]            lockedRRLevels;
         private int                 lockedContracts;
+        private double              pointValue;
 
         // Orders
         private Order               entryOrder;
         private Order               stopOrder;
         private List<Order>         tpOrders;
         private int                 sumFilled;
-        private int                 nextTPLevel;
         private int                 lastFilledLevel;
+
+        // P&L tracking
+        private double              realizedPnL;
 
         #region Strategy Properties
 
@@ -104,13 +107,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EntryType            = EntryType.Limit;
                 EntryOffsetTicks     = 0;
             }
-            else if (State == State.Configure)
-            {
-            }
             else if (State == State.DataLoaded)
             {
-                state        = TradeState.Idle;
-                tpOrders     = new List<Order>();
+                state          = TradeState.Idle;
+                tpOrders       = new List<Order>();
                 lockedRRLevels = new double[7]; // index 0 unused, 1-6 = R:R levels
             }
         }
@@ -122,7 +122,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             switch (state)
             {
                 case TradeState.Idle:
-                    ScanForArmedRRTool();
+                    ScanForConfirmedRRTool();
                     break;
 
                 case TradeState.PendingEntry:
@@ -130,51 +130,54 @@ namespace NinjaTrader.NinjaScript.Strategies
                     break;
 
                 case TradeState.InPosition:
-                    // Orders are managing themselves via OnExecutionUpdate/OnOrderUpdate.
-                    // Nothing to poll here for v1.
                     break;
             }
         }
 
-        #region Idle — scan for armed RR Tool
+        #region Idle — scan for confirmed RR Tool
 
-        private void ScanForArmedRRTool()
+        private void ScanForConfirmedRRTool()
         {
-            var rrTool = FindArmedRRTool();
+            var rrTool = FindConfirmedRRTool();
             if (rrTool == null) return;
 
             int contracts = rrTool.GetContracts();
             if (contracts < 1)
             {
-                Print("DSB: Armed RR Tool found but contracts < 1. Skipping.");
+                Print("DSB: Confirmed RR Tool found but contracts < 1. Skipping.");
                 return;
             }
 
             activeRRTool = rrTool;
+            pointValue   = Instrument.MasterInstrument.PointValue;
+            realizedPnL  = 0;
             LockLevels(rrTool, contracts);
             SubmitEntry();
+
+            // Update RR Tool visual state
+            activeRRTool.TradeState      = RRTradeState.Pending;
+            activeRRTool.CurrentSLPrice  = lockedSLPrice;
+            activeRRTool.ActiveContracts = lockedContracts;
+
             state = TradeState.PendingEntry;
-            Print(string.Format("DSB: Armed RR Tool detected. {0} {1} contracts at {2:F2}, SL {3:F2}",
+            Print(string.Format("DSB: Confirmed. {0} {1} contracts at {2:F2}, SL {3:F2}",
                 lockedIsLong ? "BUY" : "SELL", lockedContracts, lockedEntryPrice, lockedSLPrice));
         }
 
-        private RiskRewardTool FindArmedRRTool()
+        private RiskRewardTool FindConfirmedRRTool()
         {
-            RiskRewardTool found = null;
-
             foreach (var drawObj in DrawObjects.ToList())
             {
                 var rr = drawObj as RiskRewardTool;
-                if (rr == null || !rr.Armed) continue;
+                if (rr == null || rr.TradeState != RRTradeState.Confirmed) continue;
 
                 if (!string.IsNullOrEmpty(RRToolTag) && rr.Tag != RRToolTag)
                     continue;
 
-                found = rr;
-                break;
+                return rr;
             }
 
-            return found;
+            return null;
         }
 
         private void LockLevels(RiskRewardTool rr, int contracts)
@@ -188,7 +191,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 lockedRRLevels[r] = rr.GetRRLevelPrice(r);
 
             sumFilled       = 0;
-            nextTPLevel     = 1;
             lastFilledLevel = 0;
         }
 
@@ -198,17 +200,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void HandlePendingEntry()
         {
-            if (activeRRTool == null || !activeRRTool.Armed)
+            // User clicked cancel (tool went back to Unarmed)
+            if (activeRRTool == null || activeRRTool.TradeState == RRTradeState.Unarmed)
             {
-                // User disarmed the tool — cancel entry
                 if (entryOrder != null)
                     CancelOrder(entryOrder);
 
-                Reset("DSB: RR Tool disarmed. Entry cancelled.");
+                Reset("DSB: RR Tool cancelled. Entry cancelled.");
                 return;
             }
 
-            // Re-read anchors in case user dragged them while still armed
+            // Re-read anchors in case user dragged them while still pending
             double newEntry = activeRRTool.GetEntryPrice();
             if (Math.Abs(newEntry - lockedEntryPrice) > TickSize
                 && entryOrder != null
@@ -230,6 +232,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
 
                 ChangeOrder(entryOrder, lockedContracts, limitPrice, stopPrice);
+
+                activeRRTool.CurrentSLPrice  = lockedSLPrice;
+                activeRRTool.ActiveContracts = lockedContracts;
+
                 Print(string.Format("DSB: Entry updated to {0:F2}, {1} contracts", lockedEntryPrice, lockedContracts));
             }
         }
@@ -280,7 +286,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     sumFilled += execution.Quantity;
 
-                    // Only submit bracket once fully filled (or cancelled with partial)
                     if (execution.Order.OrderState != OrderState.PartFilled
                         && sumFilled == execution.Order.Filled)
                     {
@@ -290,6 +295,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                         SubmitBracketOrders();
                         state = TradeState.InPosition;
+
+                        // Update RR Tool visual
+                        if (activeRRTool != null)
+                        {
+                            activeRRTool.TradeState      = RRTradeState.Live;
+                            activeRRTool.ActiveContracts = lockedContracts;
+                            activeRRTool.CurrentSLPrice  = lockedSLPrice;
+                        }
+
                         Print(string.Format("DSB: Entry filled. {0} contracts at {1:F2}. Bracket placed.",
                             lockedContracts, price));
                     }
@@ -301,8 +315,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (stopOrder != null && execution.Order == stopOrder
                 && stopOrder.OrderState == OrderState.Filled)
             {
+                // Calculate P&L for SL fill
+                double slPnl = (price - lockedEntryPrice) * execution.Quantity * pointValue;
+                if (!lockedIsLong) slPnl = -slPnl;
+                realizedPnL += slPnl;
+
                 CancelRemainingTPs();
-                Reset(string.Format("DSB: SL hit at {0:F2}. Position closed.", price));
+
+                if (activeRRTool != null)
+                {
+                    activeRRTool.TradeState      = RRTradeState.Closed;
+                    activeRRTool.RealizedPnL     = realizedPnL;
+                    activeRRTool.ActiveContracts = 0;
+                }
+
+                Reset(string.Format("DSB: SL hit at {0:F2}. P&L: ${1:F0}. Position closed.",
+                    price, realizedPnL));
                 return;
             }
 
@@ -314,14 +342,37 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     lastFilledLevel++;
                     tpOrders.RemoveAt(i);
-                    Print(string.Format("DSB: TP {0}R filled at {1:F2}", lastFilledLevel, price));
+
+                    // Calculate P&L for this TP fill
+                    double tpPnl = (price - lockedEntryPrice) * execution.Quantity * pointValue;
+                    if (!lockedIsLong) tpPnl = -tpPnl;
+                    realizedPnL += tpPnl;
+
+                    Print(string.Format("DSB: TP {0}R filled at {1:F2}. P&L so far: ${2:F0}",
+                        lastFilledLevel, price, realizedPnL));
 
                     TrailSLAfterFill();
+
+                    // Update RR Tool visual
+                    if (activeRRTool != null)
+                    {
+                        activeRRTool.FilledTPCount  = lastFilledLevel;
+                        activeRRTool.ActiveContracts = GetRemainingQty();
+                        activeRRTool.RealizedPnL    = realizedPnL;
+                    }
 
                     if (marketPosition == MarketPosition.Flat)
                     {
                         CancelRemainingTPs();
-                        Reset(string.Format("DSB: Final TP hit. Position closed at {0:F2}.", price));
+
+                        if (activeRRTool != null)
+                        {
+                            activeRRTool.TradeState      = RRTradeState.Closed;
+                            activeRRTool.ActiveContracts = 0;
+                        }
+
+                        Reset(string.Format("DSB: Final TP hit. P&L: ${0:F0}. Position closed.",
+                            realizedPnL));
                     }
 
                     return;
@@ -334,7 +385,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             double averageFillPrice, OrderState orderState, DateTime time,
             ErrorCode error, string comment)
         {
-            // Track order references by signal name (more reliable than return value)
+            // Track order references by signal name
             if (order.Name == "DSB_Entry")
                 entryOrder = order;
             else if (order.Name == "DSB_SL")
@@ -349,6 +400,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (order == entryOrder && (orderState == OrderState.Cancelled
                                      || orderState == OrderState.Rejected))
             {
+                if (activeRRTool != null)
+                    activeRRTool.TradeState = RRTradeState.Unarmed;
+
                 Reset(string.Format("DSB: Entry {0}. {1}", orderState, comment));
             }
         }
@@ -361,14 +415,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             tpOrders.Clear();
 
-            // SL order
             OrderAction slAction = lockedIsLong ? OrderAction.Sell : OrderAction.BuyToCover;
             stopOrder = SubmitOrderUnmanaged(0, slAction, OrderType.StopMarket,
                 lockedContracts, 0, lockedSLPrice, string.Empty, "DSB_SL");
 
-            // TP orders per exit mode
             int[] splits = ComputeSplits();
-
             OrderAction tpAction = lockedIsLong ? OrderAction.Sell : OrderAction.BuyToCover;
 
             for (int i = 0; i < splits.Length; i++)
@@ -392,12 +443,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             switch (ExitMode)
             {
                 case ExitMode.HalfAndTrail:
-                    if (n < 2) return new int[] { n };  // fallback to single TP
+                    if (n < 2) return new int[] { n };
                     int half = n / 2;
                     return new int[] { half, n - half };
 
                 case ExitMode.ThirdScale:
-                    if (n < 3) return new int[] { n };  // fallback to single TP
+                    if (n < 3) return new int[] { n };
                     int third = n / 3;
                     return new int[] { third, third, n - 2 * third };
 
@@ -407,7 +458,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 case ExitMode.Runner:
                     if (n < 2) return new int[] { n };
                     int h = n / 2;
-                    return new int[] { h }; // runner portion has no TP — exits on SL trail only
+                    return new int[] { h };
 
                 default:
                     return new int[] { n };
@@ -428,7 +479,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     return Math.Min(MaxTargetRR, 6);
 
                 case ExitMode.Runner:
-                    return 1; // only first tranche has a TP
+                    return 1;
 
                 default:
                     return Math.Min(MaxTargetRR, 6);
@@ -449,13 +500,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (lastFilledLevel == 1)
             {
-                // First TP hit — move SL to breakeven
                 newSLPrice = lockedEntryPrice + (lockedIsLong ? TickSize : -TickSize);
                 Print(string.Format("DSB: SL moved to breakeven {0:F2}", newSLPrice));
             }
             else if (TrailSLToLevel && lastFilledLevel > 1)
             {
-                // Trail to previous R:R level
                 newSLPrice = lockedRRLevels[lastFilledLevel - 1];
                 Print(string.Format("DSB: SL trailed to {0}R = {1:F2}", lastFilledLevel - 1, newSLPrice));
             }
@@ -465,18 +514,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             ChangeOrder(stopOrder, remainingQty, 0, newSLPrice);
+
+            // Update RR Tool visual
+            if (activeRRTool != null)
+                activeRRTool.CurrentSLPrice = newSLPrice;
         }
 
         private int GetRemainingQty()
         {
-            int tpFilled = 0;
-            // Each TP that filled removed from tpOrders, so count remaining
-            foreach (var tp in tpOrders)
-                if (tp != null) tpFilled += tp.Quantity;
-
-            // For Runner mode, the runner portion has no TP order
-            // remainingQty = total filled entry - sum of TP quantities already filled
-            // Simplest: check actual position
             return Math.Max(1, lockedContracts - GetTPFilledQty());
         }
 
@@ -512,7 +557,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             stopOrder       = null;
             tpOrders.Clear();
             sumFilled       = 0;
-            nextTPLevel     = 1;
             lastFilledLevel = 0;
         }
 
