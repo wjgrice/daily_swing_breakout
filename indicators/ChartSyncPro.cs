@@ -57,7 +57,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 Role           = ChartSyncRole.Auto;
                 CrosshairColor = System.Windows.Media.Brushes.Yellow;
                 CrosshairWidth = 1;
-                HighlightOpacity = 20;
+                HighlightOpacity = 50;
             }
             else if (State == State.Historical)
             {
@@ -223,6 +223,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 }
             }
 
+            // Refresh all charts for this instrument
             ForceRefresh();
         }
 
@@ -239,21 +240,33 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private void ForceRefresh()
         {
-            if (ChartControl != null)
+            // Invalidate ALL charts for this instrument so slaves repaint
+            lock (s_lock)
             {
-                ChartControl.Dispatcher.InvokeAsync(() =>
+                foreach (var inst in s_instances)
                 {
-                    ChartControl.InvalidateVisual();
-                });
+                    if (inst.instrumentName == instrumentName && inst.ChartControl != null)
+                    {
+                        inst.ChartControl.Dispatcher.InvokeAsync(() =>
+                        {
+                            inst.ChartControl.InvalidateVisual();
+                        });
+                    }
+                }
             }
         }
         #endregion
 
-        #region OnRender (Slave draws crosshair)
+        #region OnRender
         protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
         {
-            if (isMaster) return;
             if (RenderTarget == null) return;
+
+            // Hook mouse on first render (ChartPanel guaranteed ready here)
+            if (isMaster && !mouseHooked)
+                HookMouse();
+
+            if (isMaster) return;
 
             double   price;
             DateTime time;
@@ -288,39 +301,34 @@ namespace NinjaTrader.NinjaScript.Indicators
                         wpfColor.B / 255f, opacity));
             }
 
-            // ── Highlight the bar that matches the synced date ───────────
-            // Match by calendar date — simple and correct for RTH hover
-            int barIdx = -1;
+            // ── Highlight all bars matching the synced date ────────────
             DateTime syncDate = time.Date;
+            int firstBar = -1;
+            int lastBar  = -1;
 
-            for (int i = ChartBars.ToIndex; i >= ChartBars.FromIndex; i--)
+            for (int i = ChartBars.FromIndex; i <= ChartBars.ToIndex; i++)
             {
                 if (i < 0 || i >= Bars.Count) continue;
                 if (Bars.GetTime(i).Date == syncDate)
                 {
-                    barIdx = i;
-                    break;
+                    if (firstBar < 0) firstBar = i;
+                    lastBar = i;
                 }
             }
 
-            if (barIdx < 0) return;  // date not visible on chart
+            if (firstBar < 0) return;  // date not visible on chart
 
-            float barX = chartControl.GetXByBarIndex(chartControl.BarsArray[0], barIdx);
+            float xLeft  = chartControl.GetXByBarIndex(chartControl.BarsArray[0], firstBar);
+            float xRight = chartControl.GetXByBarIndex(chartControl.BarsArray[0], lastBar);
+            float halfBar = (float)chartControl.BarWidth / 2f + 2f;
 
-            if (barX >= ChartPanel.X && barX <= ChartPanel.X + ChartPanel.W)
-            {
-                // Get bar width (distance between adjacent bars)
-                float halfBar = (float)chartControl.BarWidth / 2f + 2f;
+            var rect = new SharpDX.RectangleF(
+                xLeft - halfBar,
+                ChartPanel.Y,
+                (xRight - xLeft) + halfBar * 2f,
+                ChartPanel.H);
 
-                // Draw filled rectangle over the full candle column
-                var rect = new SharpDX.RectangleF(
-                    barX - halfBar,
-                    ChartPanel.Y,
-                    halfBar * 2f,
-                    ChartPanel.H);
-
-                RenderTarget.FillRectangle(rect, dxBrush);
-            }
+            RenderTarget.FillRectangle(rect, dxBrush);
         }
         #endregion
 
@@ -355,60 +363,4 @@ namespace NinjaTrader.NinjaScript.Indicators
     }
 }
 
-
-#region NinjaScript generated code. Neither change nor remove.
-
-namespace NinjaTrader.NinjaScript.Indicators
-{
-	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
-	{
-		private ChartSyncPro[] cacheChartSyncPro;
-		public ChartSyncPro ChartSyncPro(ChartSyncRole role, int crosshairWidth, int highlightOpacity)
-		{
-			return ChartSyncPro(Input, role, crosshairWidth, highlightOpacity);
-		}
-
-		public ChartSyncPro ChartSyncPro(ISeries<double> input, ChartSyncRole role, int crosshairWidth, int highlightOpacity)
-		{
-			if (cacheChartSyncPro != null)
-				for (int idx = 0; idx < cacheChartSyncPro.Length; idx++)
-					if (cacheChartSyncPro[idx] != null && cacheChartSyncPro[idx].Role == role && cacheChartSyncPro[idx].CrosshairWidth == crosshairWidth && cacheChartSyncPro[idx].HighlightOpacity == highlightOpacity && cacheChartSyncPro[idx].EqualsInput(input))
-						return cacheChartSyncPro[idx];
-			return CacheIndicator<ChartSyncPro>(new ChartSyncPro(){ Role = role, CrosshairWidth = crosshairWidth, HighlightOpacity = highlightOpacity }, input, ref cacheChartSyncPro);
-		}
-	}
-}
-
-namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
-{
-	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
-	{
-		public Indicators.ChartSyncPro ChartSyncPro(ChartSyncRole role, int crosshairWidth, int highlightOpacity)
-		{
-			return indicator.ChartSyncPro(Input, role, crosshairWidth, highlightOpacity);
-		}
-
-		public Indicators.ChartSyncPro ChartSyncPro(ISeries<double> input , ChartSyncRole role, int crosshairWidth, int highlightOpacity)
-		{
-			return indicator.ChartSyncPro(input, role, crosshairWidth, highlightOpacity);
-		}
-	}
-}
-
-namespace NinjaTrader.NinjaScript.Strategies
-{
-	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
-	{
-		public Indicators.ChartSyncPro ChartSyncPro(ChartSyncRole role, int crosshairWidth, int highlightOpacity)
-		{
-			return indicator.ChartSyncPro(Input, role, crosshairWidth, highlightOpacity);
-		}
-
-		public Indicators.ChartSyncPro ChartSyncPro(ISeries<double> input , ChartSyncRole role, int crosshairWidth, int highlightOpacity)
-		{
-			return indicator.ChartSyncPro(input, role, crosshairWidth, highlightOpacity);
-		}
-	}
-}
-
-#endregion
+// NinjaScript generated code will be added by NinjaTrader on compile

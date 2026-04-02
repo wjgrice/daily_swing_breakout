@@ -7,6 +7,7 @@ using System.Linq;
 using System.Windows.Media;
 using System.Xml.Serialization;
 using NinjaTrader.Cbi;
+using NinjaTrader.Data;
 using NinjaTrader.Gui;
 using NinjaTrader.Gui.Chart;
 using NinjaTrader.NinjaScript;
@@ -20,17 +21,31 @@ namespace NinjaTrader.NinjaScript.Indicators
         private Swing swing;
         private ATR   atr;
 
-        // Track the last confirmed swing bar to avoid duplicates
         private int lastSwingHighBar;
         private int lastSwingLowBar;
+        private int lastSwingType; // +1 = high, -1 = low, 0 = none
 
-        // Alternation: +1 = last was high, -1 = last was low, 0 = none
-        private int lastSwingType;
-
-        // Store recent major swings (alternating) for external access
         private List<SwingPoint> majorSwingHighs;
         private List<SwingPoint> majorSwingLows;
-        private List<SwingPoint> majorSwings; // interleaved, alternating
+        private List<SwingPoint> majorSwings;
+
+        // MTF state
+        private bool  isMTF;
+        private Swing htfSwing;
+        private ATR   htfATR;
+        private int   htfLastSwingHighBar;
+        private int   htfLastSwingLowBar;
+        private int   htfLastSwingType;
+
+        // Pending swings for LTF marker placement
+        private struct PendingSwing
+        {
+            public double   Price;
+            public int      Type;  // +1 = high, -1 = low
+            public DateTime RangeStart;
+            public DateTime RangeEnd;
+        }
+        private List<PendingSwing> pendingSwings;
 
         public struct SwingPoint
         {
@@ -51,8 +66,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         [Range(1, 50)]
         public int SwingStrength { get; set; }
 
-        [Display(Name = "ATR Period", GroupName = "Filter", Order = 10,
-                 Description = "ATR lookback period for minimum swing size")]
+        [Display(Name = "ATR Period", GroupName = "Filter", Order = 10)]
         [Range(5, 100)]
         public int ATRPeriod { get; set; }
 
@@ -61,13 +75,11 @@ namespace NinjaTrader.NinjaScript.Indicators
         [Range(0, 10.0)]
         public double MinATRMultiple { get; set; }
 
-        [Display(Name = "Min Swing Points", GroupName = "Filter", Order = 12,
-                 Description = "Minimum swing size in points (0 = use ATR filter only)")]
+        [Display(Name = "Min Swing Points", GroupName = "Filter", Order = 12)]
         [Range(0, 10000)]
         public double MinSwingPoints { get; set; }
 
-        [Display(Name = "Max Swings Tracked", GroupName = "Detection", Order = 2,
-                 Description = "Number of recent major swings to keep")]
+        [Display(Name = "Max Swings Tracked", GroupName = "Detection", Order = 2)]
         [Range(1, 50)]
         public int MaxSwingsTracked { get; set; }
 
@@ -93,10 +105,21 @@ namespace NinjaTrader.NinjaScript.Indicators
             set { SwingLowColor = Serialize.StringToBrush(value); }
         }
 
-        [Display(Name = "Marker Size", GroupName = "Visual", Order = 22,
-                 Description = "Size of swing markers in ticks offset from high/low")]
+        [Display(Name = "Marker Offset", GroupName = "Visual", Order = 22,
+                 Description = "Ticks offset from high/low for markers")]
         [Range(1, 20)]
         public int MarkerOffset { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "HTF Type", GroupName = "Multi-Timeframe", Order = 30,
+                 Description = "Higher timeframe bar type (Day, Minute, Week, etc.)")]
+        public BarsPeriodType HTFType { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "HTF Value", GroupName = "Multi-Timeframe", Order = 31,
+                 Description = "Higher timeframe period (e.g., 1 for Daily, 240 for 4hr)")]
+        [Range(1, 10000)]
+        public int HTFValue { get; set; }
 
         #endregion
 
@@ -105,7 +128,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (State == State.SetDefaults)
             {
                 Name             = "Swing Detector";
-                Description      = "Identifies major swing highs and lows filtered by minimum size";
+                Description      = "Major swing detection with multi-timeframe projection";
                 Calculate        = Calculate.OnBarClose;
                 IsOverlay        = true;
                 DisplayInDataBox = false;
@@ -119,6 +142,17 @@ namespace NinjaTrader.NinjaScript.Indicators
                 SwingHighColor   = Brushes.Red;
                 SwingLowColor    = Brushes.Lime;
                 MarkerOffset     = 3;
+                HTFType          = BarsPeriodType.Day;
+                HTFValue         = 1;
+            }
+            else if (State == State.Configure)
+            {
+                int chartMinutes = BarPeriodToMinutes(BarsPeriod.BarsPeriodType, BarsPeriod.Value);
+                int htfMinutes   = BarPeriodToMinutes(HTFType, HTFValue);
+                isMTF = chartMinutes < htfMinutes;
+
+                if (isMTF)
+                    AddDataSeries(HTFType, HTFValue);
             }
             else if (State == State.DataLoaded)
             {
@@ -131,20 +165,46 @@ namespace NinjaTrader.NinjaScript.Indicators
                 majorSwingHighs  = new List<SwingPoint>();
                 majorSwingLows   = new List<SwingPoint>();
                 majorSwings      = new List<SwingPoint>();
+
+                if (isMTF)
+                {
+                    htfSwing = Swing(BarsArray[1], SwingStrength);
+                    htfATR   = ATR(BarsArray[1], ATRPeriod);
+                    htfLastSwingHighBar = -1;
+                    htfLastSwingLowBar  = -1;
+                    htfLastSwingType    = 0;
+                    pendingSwings       = new List<PendingSwing>();
+                }
             }
         }
 
         protected override void OnBarUpdate()
         {
+            if (isMTF)
+            {
+                if (BarsInProgress == 1)
+                    OnHTFBarUpdate();
+                else if (BarsInProgress == 0)
+                    OnLTFBarUpdate();
+            }
+            else
+            {
+                if (BarsInProgress != 0) return;
+                OnNativeBarUpdate();
+            }
+        }
+
+        #region Native mode
+
+        private void OnNativeBarUpdate()
+        {
             if (CurrentBar < SwingStrength + ATRPeriod)
                 return;
 
             double currentATR = atr[0];
-            double minSize    = MinSwingPoints > 0
-                ? MinSwingPoints
-                : currentATR * MinATRMultiple;
+            double minSize    = MinSwingPoints > 0 ? MinSwingPoints : currentATR * MinATRMultiple;
 
-            // Check for new swing high (confirmed SwingStrength bars ago)
+            // Swing high
             int shBar = swing.SwingHighBar(0, 1, SwingStrength + 1);
             if (shBar >= 0 && (CurrentBar - shBar) != lastSwingHighBar)
             {
@@ -158,10 +218,8 @@ namespace NinjaTrader.NinjaScript.Indicators
                 {
                     if (lastSwingType == 1)
                     {
-                        // Consecutive high — replace if this one is higher
                         if (majorSwingHighs.Count > 0 && shPrice > majorSwingHighs[majorSwingHighs.Count - 1].Price)
                         {
-                            // Remove old marker
                             var old = majorSwingHighs[majorSwingHighs.Count - 1];
                             RemoveDrawObject("SH_" + old.BarIndex);
                             majorSwingHighs[majorSwingHighs.Count - 1] = new SwingPoint(shPrice, absBar);
@@ -169,21 +227,16 @@ namespace NinjaTrader.NinjaScript.Indicators
                         }
                         else
                         {
-                            // New high is lower — skip it
                             lastSwingHighBar = absBar;
                             goto CheckSwingLow;
                         }
                     }
                     else
                     {
-                        // Alternating — normal add
                         majorSwingHighs.Add(new SwingPoint(shPrice, absBar));
                         majorSwings.Add(new SwingPoint(shPrice, absBar));
-
-                        if (majorSwingHighs.Count > MaxSwingsTracked)
-                            majorSwingHighs.RemoveAt(0);
-                        if (majorSwings.Count > MaxSwingsTracked * 2)
-                            majorSwings.RemoveAt(0);
+                        if (majorSwingHighs.Count > MaxSwingsTracked) majorSwingHighs.RemoveAt(0);
+                        if (majorSwings.Count > MaxSwingsTracked * 2) majorSwings.RemoveAt(0);
                     }
 
                     lastSwingHighBar = absBar;
@@ -191,14 +244,12 @@ namespace NinjaTrader.NinjaScript.Indicators
 
                     NinjaTrader.NinjaScript.DrawingTools.Draw.TriangleDown(this,
                         "SH_" + absBar, false, shBar,
-                        shPrice + MarkerOffset * TickSize,
-                        SwingHighColor);
+                        shPrice + MarkerOffset * TickSize, SwingHighColor);
                 }
             }
 
             CheckSwingLow:
 
-            // Check for new swing low (confirmed SwingStrength bars ago)
             int slBar = swing.SwingLowBar(0, 1, SwingStrength + 1);
             if (slBar >= 0 && (CurrentBar - slBar) != lastSwingLowBar)
             {
@@ -212,7 +263,6 @@ namespace NinjaTrader.NinjaScript.Indicators
                 {
                     if (lastSwingType == -1)
                     {
-                        // Consecutive low — replace if this one is lower
                         if (majorSwingLows.Count > 0 && slPrice < majorSwingLows[majorSwingLows.Count - 1].Price)
                         {
                             var old = majorSwingLows[majorSwingLows.Count - 1];
@@ -230,11 +280,8 @@ namespace NinjaTrader.NinjaScript.Indicators
                     {
                         majorSwingLows.Add(new SwingPoint(slPrice, absBar));
                         majorSwings.Add(new SwingPoint(slPrice, absBar));
-
-                        if (majorSwingLows.Count > MaxSwingsTracked)
-                            majorSwingLows.RemoveAt(0);
-                        if (majorSwings.Count > MaxSwingsTracked * 2)
-                            majorSwings.RemoveAt(0);
+                        if (majorSwingLows.Count > MaxSwingsTracked) majorSwingLows.RemoveAt(0);
+                        if (majorSwings.Count > MaxSwingsTracked * 2) majorSwings.RemoveAt(0);
                     }
 
                     lastSwingLowBar = absBar;
@@ -242,35 +289,238 @@ namespace NinjaTrader.NinjaScript.Indicators
 
                     NinjaTrader.NinjaScript.DrawingTools.Draw.TriangleUp(this,
                         "SL_" + absBar, false, slBar,
-                        slPrice - MarkerOffset * TickSize,
-                        SwingLowColor);
+                        slPrice - MarkerOffset * TickSize, SwingLowColor);
                 }
             }
         }
+
+        #endregion
+
+        #region MTF mode — HTF swing detection
+
+        private void OnHTFBarUpdate()
+        {
+            if (CurrentBars[1] < SwingStrength + ATRPeriod)
+                return;
+
+            double currentATR = htfATR[0];
+            double minSize    = MinSwingPoints > 0 ? MinSwingPoints : currentATR * MinATRMultiple;
+
+            // Swing high on HTF
+            int shBar = htfSwing.SwingHighBar(0, 1, SwingStrength + 1);
+            if (shBar >= 0 && (CurrentBars[1] - shBar) != htfLastSwingHighBar)
+            {
+                double shPrice = Highs[1][shBar];
+                int absBar     = CurrentBars[1] - shBar;
+
+                double nearestLow = FindNearestHTFSwingLow(shBar);
+                double swingSize  = nearestLow > 0 ? Math.Abs(shPrice - nearestLow) : double.MaxValue;
+
+                if (swingSize >= minSize)
+                {
+                    bool accepted = true;
+                    if (htfLastSwingType == 1)
+                    {
+                        if (majorSwingHighs.Count > 0 && shPrice > majorSwingHighs[majorSwingHighs.Count - 1].Price)
+                        {
+                            var old = majorSwingHighs[majorSwingHighs.Count - 1];
+                            RemoveDrawObject("SH_" + old.BarIndex);
+                            majorSwingHighs[majorSwingHighs.Count - 1] = new SwingPoint(shPrice, absBar);
+                            if (majorSwings.Count > 0)
+                                majorSwings[majorSwings.Count - 1] = new SwingPoint(shPrice, absBar);
+                        }
+                        else
+                        {
+                            accepted = false;
+                        }
+                    }
+                    else
+                    {
+                        majorSwingHighs.Add(new SwingPoint(shPrice, absBar));
+                        majorSwings.Add(new SwingPoint(shPrice, absBar));
+                        if (majorSwingHighs.Count > MaxSwingsTracked) majorSwingHighs.RemoveAt(0);
+                        if (majorSwings.Count > MaxSwingsTracked * 2) majorSwings.RemoveAt(0);
+                    }
+
+                    if (accepted)
+                    {
+                        htfLastSwingHighBar = absBar;
+                        htfLastSwingType    = 1;
+
+                        // Time range: previous HTF bar close → this HTF bar close
+                        DateTime rangeEnd   = Times[1][shBar];
+                        DateTime rangeStart = (shBar + 1 < CurrentBars[1]) ? Times[1][shBar + 1] : rangeEnd.AddDays(-1);
+
+                        var ps = new PendingSwing
+                        {
+                            Price      = shPrice,
+                            Type       = 1,
+                            RangeStart = rangeStart,
+                            RangeEnd   = rangeEnd
+                        };
+                        PlaceSwingMarkerOnLTF(ps);
+                    }
+                }
+            }
+
+            // Swing low on HTF
+            int slBar = htfSwing.SwingLowBar(0, 1, SwingStrength + 1);
+            if (slBar >= 0 && (CurrentBars[1] - slBar) != htfLastSwingLowBar)
+            {
+                double slPrice = Lows[1][slBar];
+                int absBar     = CurrentBars[1] - slBar;
+
+                double nearestHigh = FindNearestHTFSwingHigh(slBar);
+                double swingSize   = nearestHigh > 0 ? Math.Abs(nearestHigh - slPrice) : double.MaxValue;
+
+                if (swingSize >= minSize)
+                {
+                    bool accepted = true;
+                    if (htfLastSwingType == -1)
+                    {
+                        if (majorSwingLows.Count > 0 && slPrice < majorSwingLows[majorSwingLows.Count - 1].Price)
+                        {
+                            var old = majorSwingLows[majorSwingLows.Count - 1];
+                            RemoveDrawObject("SL_" + old.BarIndex);
+                            majorSwingLows[majorSwingLows.Count - 1] = new SwingPoint(slPrice, absBar);
+                            if (majorSwings.Count > 0)
+                                majorSwings[majorSwings.Count - 1] = new SwingPoint(slPrice, absBar);
+                        }
+                        else
+                        {
+                            accepted = false;
+                        }
+                    }
+                    else
+                    {
+                        majorSwingLows.Add(new SwingPoint(slPrice, absBar));
+                        majorSwings.Add(new SwingPoint(slPrice, absBar));
+                        if (majorSwingLows.Count > MaxSwingsTracked) majorSwingLows.RemoveAt(0);
+                        if (majorSwings.Count > MaxSwingsTracked * 2) majorSwings.RemoveAt(0);
+                    }
+
+                    if (accepted)
+                    {
+                        htfLastSwingLowBar = absBar;
+                        htfLastSwingType   = -1;
+
+                        DateTime rangeEnd   = Times[1][slBar];
+                        DateTime rangeStart = (slBar + 1 < CurrentBars[1]) ? Times[1][slBar + 1] : rangeEnd.AddDays(-1);
+
+                        var ps = new PendingSwing
+                        {
+                            Price      = slPrice,
+                            Type       = -1,
+                            RangeStart = rangeStart,
+                            RangeEnd   = rangeEnd
+                        };
+                        PlaceSwingMarkerOnLTF(ps);
+                    }
+                }
+            }
+        }
+
+        #endregion
+
+        #region MTF mode — LTF marker placement
+
+        private void OnLTFBarUpdate()
+        {
+            // Swing placement is handled in OnHTFBarUpdate via PlaceSwingMarkerOnLTF
+        }
+
+        private void PlaceSwingMarkerOnLTF(PendingSwing ps)
+        {
+            // Scan LTF bars within the HTF bar's time range to find the extreme
+            int bestBar    = -1;
+            double bestVal = ps.Type == 1 ? double.MinValue : double.MaxValue;
+
+            for (int i = 0; i < CurrentBars[0]; i++)
+            {
+                DateTime t = Times[0][i];
+                if (t > ps.RangeEnd) continue;
+                if (t <= ps.RangeStart) break;
+
+                if (ps.Type == 1 && Highs[0][i] > bestVal)
+                {
+                    bestVal = Highs[0][i];
+                    bestBar = i;
+                }
+                else if (ps.Type == -1 && Lows[0][i] < bestVal)
+                {
+                    bestVal = Lows[0][i];
+                    bestBar = i;
+                }
+            }
+
+            if (bestBar < 0) return;
+
+            int absBar = CurrentBars[0] - bestBar;
+            string tag = (ps.Type == 1 ? "SH_" : "SL_") + absBar;
+
+            if (ps.Type == 1)
+            {
+                NinjaTrader.NinjaScript.DrawingTools.Draw.TriangleDown(this,
+                    tag, false, bestBar,
+                    bestVal + MarkerOffset * TickSize, SwingHighColor);
+            }
+            else
+            {
+                NinjaTrader.NinjaScript.DrawingTools.Draw.TriangleUp(this,
+                    tag, false, bestBar,
+                    bestVal - MarkerOffset * TickSize, SwingLowColor);
+            }
+        }
+
+        #endregion
 
         #region Helpers
 
         private double FindNearestSwingLow(int fromBarsAgo)
         {
-            // Look for the most recent swing low before this swing high
             int slBar = swing.SwingLowBar(fromBarsAgo, 1, CurrentBar);
-            if (slBar >= 0)
-                return Low[fromBarsAgo + slBar];
+            if (slBar >= 0) return Low[fromBarsAgo + slBar];
             return 0;
         }
 
         private double FindNearestSwingHigh(int fromBarsAgo)
         {
-            // Look for the most recent swing high before this swing low
             int shBar = swing.SwingHighBar(fromBarsAgo, 1, CurrentBar);
-            if (shBar >= 0)
-                return High[fromBarsAgo + shBar];
+            if (shBar >= 0) return High[fromBarsAgo + shBar];
             return 0;
+        }
+
+        private double FindNearestHTFSwingLow(int fromBarsAgo)
+        {
+            int slBar = htfSwing.SwingLowBar(fromBarsAgo, 1, CurrentBars[1]);
+            if (slBar >= 0) return Lows[1][fromBarsAgo + slBar];
+            return 0;
+        }
+
+        private double FindNearestHTFSwingHigh(int fromBarsAgo)
+        {
+            int shBar = htfSwing.SwingHighBar(fromBarsAgo, 1, CurrentBars[1]);
+            if (shBar >= 0) return Highs[1][fromBarsAgo + shBar];
+            return 0;
+        }
+
+        private int BarPeriodToMinutes(BarsPeriodType type, int value)
+        {
+            switch (type)
+            {
+                case BarsPeriodType.Minute:  return value;
+                case BarsPeriodType.Day:     return value * 1440;
+                case BarsPeriodType.Week:    return value * 10080;
+                case BarsPeriodType.Month:   return value * 43200;
+                case BarsPeriodType.Second:  return Math.Max(1, value / 60);
+                case BarsPeriodType.Tick:    return 1;
+                default:                     return value;
+            }
         }
 
         #endregion
 
-        #region Public API (for DSB strategy)
+        #region Public API
 
         public SwingPoint? GetLastMajorSwingHigh()
         {
