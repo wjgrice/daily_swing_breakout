@@ -182,6 +182,8 @@ namespace NinjaTrader.NinjaScript.Indicators
         {
             if (isMTF)
             {
+                if (CurrentBars[0] < 1 || CurrentBars[1] < 1) return;
+
                 if (BarsInProgress == 1)
                     OnHTFBarUpdate();
                 else if (BarsInProgress == 0)
@@ -372,7 +374,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private void OnHTFBarUpdate()
         {
-            if (CurrentBars[1] < SwingStrength + ATRPeriod)
+            if (CurrentBars[1] < SwingStrength + ATRPeriod + 2)
                 return;
 
             double currentATR = htfATR[0];
@@ -516,29 +518,41 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private double FindNearestSwingLow(int fromBarsAgo)
         {
-            int slBar = swing.SwingLowBar(fromBarsAgo, 1, CurrentBar);
-            if (slBar >= 0) return Low[fromBarsAgo + slBar];
+            int lookBack = CurrentBar - fromBarsAgo;
+            if (lookBack <= 0) return 0;
+            int slBar = swing.SwingLowBar(fromBarsAgo, 1, lookBack);
+            if (slBar >= 0 && (fromBarsAgo + slBar) <= CurrentBar)
+                return Low[fromBarsAgo + slBar];
             return 0;
         }
 
         private double FindNearestSwingHigh(int fromBarsAgo)
         {
-            int shBar = swing.SwingHighBar(fromBarsAgo, 1, CurrentBar);
-            if (shBar >= 0) return High[fromBarsAgo + shBar];
+            int lookBack = CurrentBar - fromBarsAgo;
+            if (lookBack <= 0) return 0;
+            int shBar = swing.SwingHighBar(fromBarsAgo, 1, lookBack);
+            if (shBar >= 0 && (fromBarsAgo + shBar) <= CurrentBar)
+                return High[fromBarsAgo + shBar];
             return 0;
         }
 
         private double FindNearestHTFSwingLow(int fromBarsAgo)
         {
-            int slBar = htfSwing.SwingLowBar(fromBarsAgo, 1, CurrentBars[1]);
-            if (slBar >= 0) return Lows[1][fromBarsAgo + slBar];
+            int lookBack = Math.Min(CurrentBars[1] - fromBarsAgo, CurrentBars[1]);
+            if (lookBack <= 0) return 0;
+            int slBar = htfSwing.SwingLowBar(fromBarsAgo, 1, lookBack);
+            if (slBar >= 0 && (fromBarsAgo + slBar) <= CurrentBars[1])
+                return Lows[1][fromBarsAgo + slBar];
             return 0;
         }
 
         private double FindNearestHTFSwingHigh(int fromBarsAgo)
         {
-            int shBar = htfSwing.SwingHighBar(fromBarsAgo, 1, CurrentBars[1]);
-            if (shBar >= 0) return Highs[1][fromBarsAgo + shBar];
+            int lookBack = Math.Min(CurrentBars[1] - fromBarsAgo, CurrentBars[1]);
+            if (lookBack <= 0) return 0;
+            int shBar = htfSwing.SwingHighBar(fromBarsAgo, 1, lookBack);
+            if (shBar >= 0 && (fromBarsAgo + shBar) <= CurrentBars[1])
+                return Highs[1][fromBarsAgo + shBar];
             return 0;
         }
 
