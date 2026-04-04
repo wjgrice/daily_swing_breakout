@@ -39,7 +39,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double              actualFillPrice;
         private double              lockedSLPrice;
         private bool                lockedIsLong;
-        private double[]            lockedRRLevels;
         private int                 lockedContracts;
         private double              pointValue;
 
@@ -175,6 +174,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Range(1, 200)]
         public int CooldownBars { get; set; }
 
+        [NinjaScriptProperty]
         [Display(Name = "Use Trend Filter", GroupName = "2. Auto Detection", Order = 30)]
         public bool UseTrendFilter { get; set; }
 
@@ -268,7 +268,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (State == State.DataLoaded)
             {
                 state          = TradeState.Idle;
-                lockedRRLevels = new double[7];
                 lastSignalBar  = -1;
 
                 if (AutoDetect)
@@ -365,10 +364,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             lockedSLPrice    = rr.GetSLPrice();
             lockedIsLong     = rr.IsLong();
             lockedContracts  = contracts;
-
-            for (int r = 1; r <= 6; r++)
-                lockedRRLevels[r] = rr.GetRRLevelPrice(r);
-
             sumFilled = 0;
         }
 
@@ -630,11 +625,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             lockedContracts = (int)Math.Floor(riskAmount / riskPerContract);
             if (lockedContracts < 1) return;
 
-            // Compute R:R levels
-            double direction = entryPrice - slPrice;
-            for (int r = 1; r <= 6; r++)
-                lockedRRLevels[r] = entryPrice + direction * r;
-
             sumFilled = 0;
 
             double totalRisk = riskPerContract * lockedContracts;
@@ -677,7 +667,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     activeRRTool.ActiveContracts = lockedContracts;
                 }
             }
-            // Auto mode: nothing to update — entry is fire-and-forget
+            // Auto mode: cancel entry if pending too long (entry never reached)
+            if (activeRRTool == null && entryOrder != null)
+            {
+                if (entryOrder.OrderState == OrderState.Working
+                    && CurrentBar - lastSignalBar > CooldownBars * 10)
+                {
+                    CancelOrder(entryOrder);
+                    Reset("DSB: Auto entry timed out.");
+                }
+            }
         }
 
         #endregion
@@ -808,6 +807,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     activeRRTool.TradeState = RRTradeState.Unarmed;
                 Reset(string.Format("DSB: Entry {0}. {1}", orderState, comment));
             }
+
+            // SL rejected — emergency flatten
+            if (order == stopOrder && (orderState == OrderState.Rejected))
+            {
+                Print(string.Format("DSB: SL REJECTED — submitting market exit. {0}", comment));
+                OrderAction exitAction = lockedIsLong ? OrderAction.Sell : OrderAction.BuyToCover;
+                SubmitOrderUnmanaged(0, exitAction, OrderType.Market,
+                    lockedContracts, 0, 0, string.Empty, "DSB_EmergencyExit");
+                Reset("DSB: Emergency exit after SL rejection.");
+            }
         }
 
         #endregion
@@ -821,13 +830,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 && stopOrder.OrderState != OrderState.Accepted) return;
 
             double currentPrice = Close[0];
-            double riskDist = Math.Abs(lockedEntryPrice - lockedSLPrice);
+            double fillPrice = actualFillPrice > 0 ? actualFillPrice : lockedEntryPrice;
+            double riskDist = Math.Abs(fillPrice - lockedSLPrice);
             if (riskDist <= 0) return;
 
-            // How far has price moved in R multiples?
+            // How far has price moved in R multiples from actual fill?
             double currentR = lockedIsLong
-                ? (currentPrice - lockedEntryPrice) / riskDist
-                : (lockedEntryPrice - currentPrice) / riskDist;
+                ? (currentPrice - fillPrice) / riskDist
+                : (fillPrice - currentPrice) / riskDist;
 
             if (currentR <= 0) return;
 
@@ -838,7 +848,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Step 1: Breakeven trigger
             if (currentR >= BETriggerR && highestPassedLevel == 0)
             {
-                newSLPrice = lockedEntryPrice + (lockedIsLong ? TickSize : -TickSize);
+                newSLPrice = fillPrice + (lockedIsLong ? TickSize : -TickSize);
                 highestPassedLevel = 1;
                 trailLabel = string.Format("{0:F1}R → BE", BETriggerR);
             }
@@ -854,8 +864,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (slAtR > 0)
                 {
                     double candidateSL = lockedIsLong
-                        ? lockedEntryPrice + slAtR * riskDist
-                        : lockedEntryPrice - slAtR * riskDist;
+                        ? fillPrice + slAtR * riskDist
+                        : fillPrice - slAtR * riskDist;
 
                     if (newSLPrice == 0 || (lockedIsLong ? candidateSL > newSLPrice : candidateSL < newSLPrice))
                     {
