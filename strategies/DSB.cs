@@ -20,6 +20,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         StopLimit
     }
 
+    public enum TradeDirection
+    {
+        Both,
+        LongsOnly,
+        ShortsOnly
+    }
+
     public class DSB : Strategy
     {
         private enum TradeState { Idle, PendingEntry, InPosition }
@@ -48,23 +55,30 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double              realizedPnL;
 
         // Auto-detection state
-        private Swing               swingIndicator;
-        private ATR                 atrIndicator;
+        private Swing               htfSwing;          // daily swings for entry signals
+        private Swing               ltfSwing;          // chart-TF swings for SL placement
+        private ATR                 htfATR;
         private double              lastSwingHighPrice;
         private double              lastSwingLowPrice;
-        private int                 lastSwingHighBar;
-        private int                 lastSwingLowBar;
+        private int                 lastSwingHighAbsBar;
+        private int                 lastSwingLowAbsBar;
         private bool                swingHighViolated;
         private bool                swingLowViolated;
+        private int                 lastSignalBar;
+
+        // Trend filter
+        private LinRegSlope         trendLinReg;
+
+        // HTF inside bar tracking
+        private bool                htfPrevIsInside;
+        private double              htfPrevMotherHigh;
+        private double              htfPrevMotherLow;
         private bool                wasInsideBar;
         private double              lastMotherHigh;
         private double              lastMotherLow;
-        private int                 lastSignalBar;
-
-        // Inside bar tracking (inline)
-        private bool                prevBarIsInside;
-        private double              prevMotherHigh;
-        private double              prevMotherLow;
+        private double              lastTradedMotherHigh;
+        private double              lastTradedMotherLow;
+        private double              lastTradedSwingPrice;
 
         #region Strategy Properties — Manual Mode
 
@@ -87,39 +101,116 @@ namespace NinjaTrader.NinjaScript.Strategies
                  Description = "Enable automatic entry detection (for backtesting)")]
         public bool AutoDetect { get; set; }
 
-        [Display(Name = "Enable Swing Entries", GroupName = "2. Auto Detection", Order = 2)]
+        [NinjaScriptProperty]
+        [Display(Name = "Trade Direction", GroupName = "2. Auto Detection", Order = 2)]
+        public TradeDirection Direction { get; set; }
+
+        [Display(Name = "Enable Swing Entries", GroupName = "2. Auto Detection", Order = 3)]
         public bool EnableSwingEntries { get; set; }
 
         [Display(Name = "Enable Inside Bar Entries", GroupName = "2. Auto Detection", Order = 3)]
         public bool EnableInsideBarEntries { get; set; }
 
-        [Display(Name = "Swing Strength", GroupName = "2. Auto Detection", Order = 10)]
+        [NinjaScriptProperty]
+        [Display(Name = "Swing Strength", GroupName = "2. Auto Detection", Order = 10,
+                 Description = "HTF swing strength for entry detection")]
         [Range(1, 50)]
         public int SwingStrength { get; set; }
 
-        [Display(Name = "ATR Period", GroupName = "2. Auto Detection", Order = 11)]
+        [NinjaScriptProperty]
+        [Display(Name = "LTF Swing Strength", GroupName = "2. Auto Detection", Order = 11,
+                 Description = "Chart-TF swing strength for SL placement")]
+        [Range(1, 50)]
+        public int LTFSwingStrength { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "LTF Bar Type", GroupName = "2. Auto Detection", Order = 12,
+                 Description = "Bar type for SL swing detection (Minute, Day, etc.)")]
+        public BarsPeriodType LTFBarType { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "LTF Bar Value", GroupName = "2. Auto Detection", Order = 13,
+                 Description = "Bar period for SL swing detection (e.g., 15 for 15min)")]
+        [Range(1, 1440)]
+        public int LTFBarValue { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Min SL ATR", GroupName = "2. Auto Detection", Order = 14,
+                 Description = "Min SL distance as daily ATR multiple (falls back to next swing if too close)")]
+        [Range(0.1, 3.0)]
+        public double MinSLATR { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Max SL ATR", GroupName = "2. Auto Detection", Order = 13,
+                 Description = "Max SL distance as daily ATR multiple (skip trade if too far)")]
+        [Range(0.5, 10.0)]
+        public double MaxSLATR { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "ATR Period", GroupName = "2. Auto Detection", Order = 14)]
         [Range(5, 100)]
         public int ATRPeriod { get; set; }
 
-        [Display(Name = "Min Swing ATR", GroupName = "2. Auto Detection", Order = 12,
-                 Description = "Minimum swing size as ATR multiple")]
+        [NinjaScriptProperty]
+        [Display(Name = "Min Swing ATR", GroupName = "2. Auto Detection", Order = 15,
+                 Description = "Min swing size as ATR multiple")]
         [Range(0, 10.0)]
         public double MinSwingATR { get; set; }
 
-        [Display(Name = "Min Mother ATR", GroupName = "2. Auto Detection", Order = 13,
+        [NinjaScriptProperty]
+        [Display(Name = "Min Mother ATR", GroupName = "2. Auto Detection", Order = 16,
                  Description = "Mother bar must be >= this ATR multiple")]
         [Range(0, 5.0)]
         public double MinMotherATR { get; set; }
 
+        [NinjaScriptProperty]
         [Display(Name = "Risk %", GroupName = "2. Auto Detection", Order = 20,
                  Description = "% of equity to risk per auto trade")]
         [Range(0.1, 10.0)]
         public double RiskPercent { get; set; }
 
+        [NinjaScriptProperty]
         [Display(Name = "Cooldown Bars", GroupName = "2. Auto Detection", Order = 21,
                  Description = "Min bars between auto signals")]
         [Range(1, 200)]
         public int CooldownBars { get; set; }
+
+        [Display(Name = "Use Trend Filter", GroupName = "2. Auto Detection", Order = 30)]
+        public bool UseTrendFilter { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Trend LinReg Period", GroupName = "2. Auto Detection", Order = 31,
+                 Description = "LinReg slope period on daily bars")]
+        [Range(5, 100)]
+        public int TrendLinRegPeriod { get; set; }
+
+        #endregion
+
+        #region Strategy Properties — Trailing Stop
+
+        [NinjaScriptProperty]
+        [Display(Name = "BE Trigger (R)", GroupName = "3. Trailing Stop", Order = 1,
+                 Description = "R multiple that triggers breakeven")]
+        [Range(0.1, 6.0)]
+        public double BETriggerR { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Trail Start (R)", GroupName = "3. Trailing Stop", Order = 2,
+                 Description = "R multiple where trailing begins")]
+        [Range(0.5, 6.0)]
+        public double TrailStartR { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Trail Step (R)", GroupName = "3. Trailing Stop", Order = 3,
+                 Description = "R step between trail levels")]
+        [Range(0.1, 3.0)]
+        public double TrailStepR { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Trail Offset (R)", GroupName = "3. Trailing Stop", Order = 4,
+                 Description = "SL trails this far behind current level")]
+        [Range(0.1, 3.0)]
+        public double TrailOffsetR { get; set; }
 
         #endregion
 
@@ -129,7 +220,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 Name                 = "DSB";
                 Description          = "Daily Swing Breakout — manual RR Tool + auto detection";
-                Calculate            = Calculate.OnEachTick;
+                Calculate            = Calculate.OnBarClose;
                 IsUnmanaged          = true;
                 EntriesPerDirection  = 1;
                 EntryHandling        = EntryHandling.AllEntries;
@@ -142,15 +233,37 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EntryOffsetTicks     = 0;
 
                 // Auto detection (off by default for live)
-                AutoDetect           = false;
+                AutoDetect           = true;
+                Direction            = TradeDirection.Both;
                 EnableSwingEntries   = true;
                 EnableInsideBarEntries = true;
-                SwingStrength        = 5;
-                ATRPeriod            = 14;
-                MinSwingATR          = 1.5;
+                SwingStrength        = 3;
+                LTFSwingStrength     = 3;
+                LTFBarType           = BarsPeriodType.Minute;
+                LTFBarValue          = 15;
+                MinSLATR             = 0.3;
+                MaxSLATR             = 3.0;
+                ATRPeriod            = 10;
+                MinSwingATR          = 0.85;
                 MinMotherATR         = 0.75;
                 RiskPercent          = 4.0;
-                CooldownBars         = 5;
+                CooldownBars         = 3;
+                UseTrendFilter       = true;
+                TrendLinRegPeriod    = 20;
+
+                // Trailing stop defaults
+                BETriggerR           = 0.5;
+                TrailStartR          = 1.5;
+                TrailStepR           = 1.0;
+                TrailOffsetR         = 0.6;
+            }
+            else if (State == State.Configure)
+            {
+                if (AutoDetect)
+                {
+                    AddDataSeries(BarsPeriodType.Day, 1);    // BarsArray[1] — HTF for entries
+                    AddDataSeries(LTFBarType, LTFBarValue);  // BarsArray[2] — LTF for SL swings
+                }
             }
             else if (State == State.DataLoaded)
             {
@@ -160,14 +273,30 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 if (AutoDetect)
                 {
-                    swingIndicator = Swing(SwingStrength);
-                    atrIndicator   = ATR(ATRPeriod);
+                    // Daily swings for entry signal detection
+                    htfSwing = Swing(BarsArray[1], SwingStrength);
+                    htfATR   = ATR(BarsArray[1], ATRPeriod);
+
+                    // LTF (15min) swings for SL placement
+                    ltfSwing = Swing(BarsArray[2], LTFSwingStrength);
+
+                    // Daily trend filter
+                    if (UseTrendFilter)
+                        trendLinReg = LinRegSlope(BarsArray[1], TrendLinRegPeriod);
                 }
             }
         }
 
         protected override void OnBarUpdate()
         {
+            // For auto-detect: process HTF inside bars when daily bar updates
+            if (AutoDetect && BarsInProgress == 1)
+            {
+                UpdateHTFInsideBarState();
+                return;
+            }
+
+            if (BarsInProgress != 0) return; // ignore LTF (2) and any other series
             if (CurrentBar < 1) return;
 
             switch (state)
@@ -249,17 +378,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void ScanForAutoSetup()
         {
-            if (CurrentBar < SwingStrength + ATRPeriod + 2) return;
+            if (CurrentBars[0] < 20 || CurrentBars[1] < SwingStrength + ATRPeriod + 2 || CurrentBars[2] < LTFSwingStrength + 2) return;
 
             // Cooldown check
             if (lastSignalBar >= 0 && CurrentBar - lastSignalBar < CooldownBars)
                 return;
 
-            // Update swing levels
-            UpdateSwingLevels();
+            // Update HTF (daily) swing levels
+            UpdateHTFSwingLevels();
 
-            // Detect inside bars inline
-            UpdateInsideBarState();
+            // Inside bar state updated in OnBarUpdate when BarsInProgress==1
 
             // Check for setups
             if (EnableSwingEntries)
@@ -269,111 +397,179 @@ namespace NinjaTrader.NinjaScript.Strategies
                 CheckInsideBarBreakout();
         }
 
-        private void UpdateSwingLevels()
+        private void UpdateHTFSwingLevels()
         {
-            // Check for new swing high
-            int shBar = swingIndicator.SwingHighBar(0, 1, SwingStrength + 1);
-            if (shBar >= 0 && (CurrentBar - shBar) != lastSwingHighBar)
+            // Check for new daily swing high
+            int shBar = htfSwing.SwingHighBar(0, 1, SwingStrength + 1);
+            if (shBar >= 0)
             {
-                double shPrice = High[shBar];
+                double shPrice = Highs[1][shBar];
+                int absBar = CurrentBars[1] - shBar;
 
-                // ATR filter
-                double minSize = atrIndicator[0] * MinSwingATR;
-                double nearestLow = GetNearestSwingLow(shBar);
-                if (nearestLow > 0 && Math.Abs(shPrice - nearestLow) >= minSize)
+                if (absBar != lastSwingHighAbsBar)
                 {
-                    lastSwingHighPrice = shPrice;
-                    lastSwingHighBar   = CurrentBar - shBar;
-                    swingHighViolated  = false;
+                    // ATR filter
+                    double minSize = htfATR[0] * MinSwingATR;
+                    int slBar = htfSwing.SwingLowBar(shBar, 1, Math.Max(1, CurrentBars[1] - shBar));
+                    double nearestLow = slBar >= 0 && (shBar + slBar) <= CurrentBars[1] ? Lows[1][shBar + slBar] : 0;
+
+                    if (nearestLow > 0 && Math.Abs(shPrice - nearestLow) >= minSize)
+                    {
+                        lastSwingHighPrice  = shPrice;
+                        lastSwingHighAbsBar = absBar;
+                        swingHighViolated   = false;
+                        lastTradedSwingPrice = 0; // new swing — allow trading
+                    }
                 }
             }
 
-            // Check for new swing low
-            int slBar = swingIndicator.SwingLowBar(0, 1, SwingStrength + 1);
-            if (slBar >= 0 && (CurrentBar - slBar) != lastSwingLowBar)
+            // Check for new daily swing low
+            int slBarCheck = htfSwing.SwingLowBar(0, 1, SwingStrength + 1);
+            if (slBarCheck >= 0)
             {
-                double slPrice = Low[slBar];
+                double slPrice = Lows[1][slBarCheck];
+                int absBar = CurrentBars[1] - slBarCheck;
 
-                double minSize = atrIndicator[0] * MinSwingATR;
-                double nearestHigh = GetNearestSwingHigh(slBar);
-                if (nearestHigh > 0 && Math.Abs(nearestHigh - slPrice) >= minSize)
+                if (absBar != lastSwingLowAbsBar)
                 {
-                    lastSwingLowPrice = slPrice;
-                    lastSwingLowBar   = CurrentBar - slBar;
-                    swingLowViolated  = false;
+                    double minSize = htfATR[0] * MinSwingATR;
+                    int shBarCheck = htfSwing.SwingHighBar(slBarCheck, 1, Math.Max(1, CurrentBars[1] - slBarCheck));
+                    double nearestHigh = shBarCheck >= 0 && (slBarCheck + shBarCheck) <= CurrentBars[1] ? Highs[1][slBarCheck + shBarCheck] : 0;
+
+                    if (nearestHigh > 0 && Math.Abs(nearestHigh - slPrice) >= minSize)
+                    {
+                        lastSwingLowPrice  = slPrice;
+                        lastSwingLowAbsBar = absBar;
+                        swingLowViolated   = false;
+                        lastTradedSwingPrice = 0; // new swing — allow trading
+                    }
                 }
             }
         }
 
-        private double GetNearestSwingLow(int fromBarsAgo)
+        private void UpdateHTFInsideBarState()
         {
-            int lookBack = CurrentBar - fromBarsAgo;
-            if (lookBack <= 0) return 0;
-            int slBar = swingIndicator.SwingLowBar(fromBarsAgo, 1, lookBack);
-            if (slBar >= 0 && (fromBarsAgo + slBar) <= CurrentBar)
-                return Low[fromBarsAgo + slBar];
-            return 0;
-        }
+            // Inline daily inside bar detection on BarsArray[1]
+            if (CurrentBars[1] < 2) return;
 
-        private double GetNearestSwingHigh(int fromBarsAgo)
-        {
-            int lookBack = CurrentBar - fromBarsAgo;
-            if (lookBack <= 0) return 0;
-            int shBar = swingIndicator.SwingHighBar(fromBarsAgo, 1, lookBack);
-            if (shBar >= 0 && (fromBarsAgo + shBar) <= CurrentBar)
-                return High[fromBarsAgo + shBar];
-            return 0;
-        }
+            double mHigh = htfPrevIsInside ? htfPrevMotherHigh : Highs[1][1];
+            double mLow  = htfPrevIsInside ? htfPrevMotherLow  : Lows[1][1];
 
-        private void UpdateInsideBarState()
-        {
-            if (CurrentBar < 2) return;
+            bool isIB = Highs[1][0] <= mHigh && Lows[1][0] >= mLow;
 
-            double mHigh = prevBarIsInside ? prevMotherHigh : High[1];
-            double mLow  = prevBarIsInside ? prevMotherLow  : Low[1];
-
-            bool isIB = High[0] <= mHigh && Low[0] >= mLow;
-
-            // Mother bar ATR filter
-            if (isIB && MinMotherATR > 0 && !prevBarIsInside)
+            if (isIB && MinMotherATR > 0 && !htfPrevIsInside)
             {
-                if ((mHigh - mLow) < MinMotherATR * atrIndicator[0])
+                if ((mHigh - mLow) < MinMotherATR * htfATR[0])
                     isIB = false;
             }
 
             if (isIB)
             {
-                wasInsideBar    = true;
-                lastMotherHigh  = mHigh;
-                lastMotherLow   = mLow;
-                prevBarIsInside = true;
-                prevMotherHigh  = mHigh;
-                prevMotherLow   = mLow;
+                htfPrevIsInside   = true;
+                htfPrevMotherHigh = mHigh;
+                htfPrevMotherLow  = mLow;
+
+                // Only set wasInsideBar if this is a NEW mother bar we haven't traded
+                if (mHigh != lastTradedMotherHigh || mLow != lastTradedMotherLow)
+                {
+                    wasInsideBar   = true;
+                    lastMotherHigh = mHigh;
+                    lastMotherLow  = mLow;
+                }
             }
             else
             {
-                prevBarIsInside = false;
-                prevMotherHigh  = 0;
-                prevMotherLow   = 0;
+                htfPrevIsInside   = false;
+                htfPrevMotherHigh = 0;
+                htfPrevMotherLow  = 0;
+                wasInsideBar      = false;
+                // New daily bar broke out of inside bar — allow future inside bars to trade
+                lastTradedMotherHigh = 0;
+                lastTradedMotherLow  = 0;
             }
+        }
+
+        private double GetLTFSwingSL(bool isLong, double entryPrice)
+        {
+            if (CurrentBars[2] < LTFSwingStrength + 1) return 0;
+            int lookBack = Math.Min(CurrentBars[2], 500);
+
+            double dailyATR = CurrentBars[1] >= ATRPeriod ? htfATR[0] : 0;
+            double minDist  = dailyATR * MinSLATR;
+            double maxDist  = dailyATR * MaxSLATR;
+
+            // Try swing instances 1 through 5, find first in valid range
+            for (int instance = 1; instance <= 5; instance++)
+            {
+                double swingPrice = 0;
+
+                if (isLong)
+                {
+                    int slBar = ltfSwing.SwingLowBar(0, instance, lookBack);
+                    if (slBar >= 0) swingPrice = Lows[2][slBar];
+                }
+                else
+                {
+                    int shBar = ltfSwing.SwingHighBar(0, instance, lookBack);
+                    if (shBar >= 0) swingPrice = Highs[2][shBar];
+                }
+
+                if (swingPrice <= 0) break;
+
+                double dist = Math.Abs(entryPrice - swingPrice);
+
+                if (dist >= minDist)
+                {
+                    if (dist <= maxDist)
+                        return swingPrice;
+                    else
+                        return 0;
+                }
+            }
+
+            return 0;
+        }
+
+        private bool IsTrendAllowed(bool isLong)
+        {
+            // Direction filter
+            if (Direction == TradeDirection.LongsOnly && !isLong) return false;
+            if (Direction == TradeDirection.ShortsOnly && isLong) return false;
+
+            // LinReg trend filter
+            if (!UseTrendFilter || trendLinReg == null) return true;
+            if (CurrentBars[1] < TrendLinRegPeriod) return false;
+
+            bool slopeUp = trendLinReg[0] > 0;
+            return isLong ? slopeUp : !slopeUp;
         }
 
         private void CheckSwingViolation()
         {
             if (lastSwingHighPrice <= 0 || lastSwingLowPrice <= 0) return;
 
-            // Price breaks ABOVE swing high → LONG
+            // Price breaks ABOVE daily swing high → LONG
             if (!swingHighViolated && High[0] > lastSwingHighPrice)
             {
                 swingHighViolated = true;
-                EmitAutoSignal(lastSwingHighPrice, lastSwingLowPrice, true, "Swing High break");
+                if (lastSwingHighPrice == lastTradedSwingPrice) return;
+                if (!IsTrendAllowed(true)) return;
+                double sl = GetLTFSwingSL(true, lastSwingHighPrice);
+                if (sl <= 0 || sl >= lastSwingHighPrice) return;
+                lastTradedSwingPrice = lastSwingHighPrice;
+                EmitAutoSignal(lastSwingHighPrice, sl, true, "Daily SH break");
             }
 
-            // Price breaks BELOW swing low → SHORT
+            // Price breaks BELOW daily swing low → SHORT
             if (!swingLowViolated && Low[0] < lastSwingLowPrice)
             {
                 swingLowViolated = true;
-                EmitAutoSignal(lastSwingLowPrice, lastSwingHighPrice, false, "Swing Low break");
+                if (lastSwingLowPrice == lastTradedSwingPrice) return;
+                if (!IsTrendAllowed(false)) return;
+                double sl = GetLTFSwingSL(false, lastSwingLowPrice);
+                if (sl <= 0 || sl <= lastSwingLowPrice) return;
+                lastTradedSwingPrice = lastSwingLowPrice;
+                EmitAutoSignal(lastSwingLowPrice, sl, false, "Daily SL break");
             }
         }
 
@@ -381,26 +577,29 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (!wasInsideBar || lastMotherHigh <= 0 || lastMotherLow <= 0) return;
 
-            // Only check on the bar AFTER the inside bar cluster ends
-            if (prevBarIsInside) return;
+            // Skip if we already traded this exact mother bar setup
+            if (lastMotherHigh == lastTradedMotherHigh && lastMotherLow == lastTradedMotherLow)
+                return;
 
-            // Breakout above mother bar → LONG
             if (High[0] > lastMotherHigh)
             {
-                double sl = lastMotherLow;
-                if (lastSwingLowPrice > 0 && lastSwingLowPrice > sl)
-                    sl = lastSwingLowPrice;
-                EmitAutoSignal(lastMotherHigh, sl, true, "IB breakout UP");
                 wasInsideBar = false;
+                lastTradedMotherHigh = lastMotherHigh;
+                lastTradedMotherLow  = lastMotherLow;
+                if (!IsTrendAllowed(true)) return;
+                double sl = GetLTFSwingSL(true, lastMotherHigh);
+                if (sl <= 0 || sl >= lastMotherHigh) sl = lastMotherLow;
+                EmitAutoSignal(lastMotherHigh, sl, true, "Inside Bar UP");
             }
-            // Breakout below mother bar → SHORT
             else if (Low[0] < lastMotherLow)
             {
-                double sl = lastMotherHigh;
-                if (lastSwingHighPrice > 0 && lastSwingHighPrice < sl)
-                    sl = lastSwingHighPrice;
-                EmitAutoSignal(lastMotherLow, sl, false, "IB breakout DOWN");
                 wasInsideBar = false;
+                lastTradedMotherHigh = lastMotherHigh;
+                lastTradedMotherLow  = lastMotherLow;
+                if (!IsTrendAllowed(false)) return;
+                double sl = GetLTFSwingSL(false, lastMotherLow);
+                if (sl <= 0 || sl <= lastMotherLow) sl = lastMotherHigh;
+                EmitAutoSignal(lastMotherLow, sl, false, "Inside Bar DOWN");
             }
         }
 
@@ -622,25 +821,53 @@ namespace NinjaTrader.NinjaScript.Strategies
                 && stopOrder.OrderState != OrderState.Accepted) return;
 
             double currentPrice = Close[0];
-            int newHighest = highestPassedLevel;
+            double riskDist = Math.Abs(lockedEntryPrice - lockedSLPrice);
+            if (riskDist <= 0) return;
 
-            for (int r = newHighest + 1; r <= 6; r++)
+            // How far has price moved in R multiples?
+            double currentR = lockedIsLong
+                ? (currentPrice - lockedEntryPrice) / riskDist
+                : (lockedEntryPrice - currentPrice) / riskDist;
+
+            if (currentR <= 0) return;
+
+            // Determine what SL should be based on current R progress
+            double newSLPrice = 0;
+            string trailLabel = "";
+
+            // Step 1: Breakeven trigger
+            if (currentR >= BETriggerR && highestPassedLevel == 0)
             {
-                bool passed = lockedIsLong
-                    ? currentPrice >= lockedRRLevels[r]
-                    : currentPrice <= lockedRRLevels[r];
-                if (!passed) break;
-                newHighest = r;
+                newSLPrice = lockedEntryPrice + (lockedIsLong ? TickSize : -TickSize);
+                highestPassedLevel = 1;
+                trailLabel = string.Format("{0:F1}R → BE", BETriggerR);
             }
 
-            if (newHighest <= highestPassedLevel) return;
+            // Step 2: Level-by-level trailing from TrailStartR onward
+            if (currentR >= TrailStartR)
+            {
+                // How many trail steps past TrailStartR?
+                int steps = (int)Math.Floor((currentR - TrailStartR) / TrailStepR);
+                double trailLevel = TrailStartR + steps * TrailStepR;
+                double slAtR = trailLevel - TrailOffsetR;
 
-            double newSLPrice;
-            if (highestPassedLevel == 0 && newHighest >= 1)
-                newSLPrice = lockedEntryPrice + (lockedIsLong ? TickSize : -TickSize);
-            else
-                newSLPrice = lockedRRLevels[newHighest - 1];
+                if (slAtR > 0)
+                {
+                    double candidateSL = lockedIsLong
+                        ? lockedEntryPrice + slAtR * riskDist
+                        : lockedEntryPrice - slAtR * riskDist;
 
+                    if (newSLPrice == 0 || (lockedIsLong ? candidateSL > newSLPrice : candidateSL < newSLPrice))
+                    {
+                        newSLPrice = candidateSL;
+                        trailLabel = string.Format("{0:F1}R → SL at {1:F1}R", trailLevel, slAtR);
+                    }
+                }
+            }
+
+            if (newSLPrice == 0) return;
+
+            // Only move forward
             bool isForward = lockedIsLong
                 ? newSLPrice > stopOrder.StopPrice
                 : newSLPrice < stopOrder.StopPrice;
@@ -648,21 +875,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (isForward)
             {
                 ChangeOrder(stopOrder, lockedContracts, 0, newSLPrice);
-                highestPassedLevel = newHighest;
 
-                Print(string.Format("DSB: 1:{0} passed → SL to {1:F2}", newHighest, newSLPrice));
+                Print(string.Format("DSB: {0} | SL to {1:F2}", trailLabel, newSLPrice));
 
                 if (activeRRTool != null)
-                {
                     activeRRTool.CurrentSLPrice = newSLPrice;
-                    activeRRTool.FilledTPLevels |= (1 << newHighest);
-                }
-            }
-            else
-            {
-                highestPassedLevel = newHighest;
-                if (activeRRTool != null)
-                    activeRRTool.FilledTPLevels |= (1 << newHighest);
             }
         }
 
